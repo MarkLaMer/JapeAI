@@ -1,6 +1,6 @@
 from lark import Lark, Transformer, v_args
 
-from parser.ast import Atom, Not, And, Imp
+from .ast import Atom, Not, And, Imp
 
 GRAMMER = r""" #lark syntax, don't ask
 ?start: formula #The parser should start by parsing a formula.
