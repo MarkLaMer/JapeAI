@@ -1,27 +1,34 @@
-# NOT YET IMPLEMENTED
-
-# from parser.ast import Atom, And, Imp
-# from search.prover import prove
-
-
-# def test_prove_assumption():
-#     proof = prove(goal=Atom("P"), assumptions={Atom("P")})
-#     assert proof is not None
+from parser.parser import parse_formula
+from search.state import SearchState
+from search.planner import bfs_plan
 
 
-# def test_prove_and_elim():
-#     proof = prove(goal=Atom("P"), assumptions={And(Atom("P"), Atom("Q"))})
-#     assert proof is not None
+def make_state(ctx_strings, goal_string):
+    context = frozenset(parse_formula(s) for s in ctx_strings)
+    goal = parse_formula(goal_string)
+    return SearchState(goals=(goal,), context=context, depth=0)
 
 
-# def test_prove_modus_ponens():
-#     proof = prove(
-#         goal=Atom("Q"),
-#         assumptions={Atom("P"), Imp(Atom("P"), Atom("Q"))}
-#     )
-#     assert proof is not None
+def test_search_assumption():
+    result = bfs_plan(make_state(["P"], "P"))
+    assert result.success
 
 
-# def test_unprovable_goal():
-#     proof = prove(goal=Atom("Q"), assumptions={Atom("P")})
-#     assert proof is None
+def test_search_mp():
+    result = bfs_plan(make_state(["P", "P -> Q"], "Q"))
+    assert result.success
+
+
+def test_search_imp_intro():
+    result = bfs_plan(make_state([], "P -> P"))
+    assert result.success
+
+
+def test_search_and_intro():
+    result = bfs_plan(make_state(["P", "Q"], "P & Q"))
+    assert result.success
+
+
+def test_search_failure():
+    result = bfs_plan(make_state(["P"], "Q"))
+    assert not result.success
