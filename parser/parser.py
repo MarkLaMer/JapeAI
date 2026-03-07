@@ -13,7 +13,7 @@ GRAMMER = r""" #lark syntax, don't ask
     | conjunction "&" unary -> and_op #Case: When this rule matches, call the transformer function and_op()
 
 ?unary: atom  # case 1: atom
-    | "~" unary # case 2: neg
+    | "~" unary -> not_op # case 2: neg
     | "(" formula ")" #case 3: parentheses
 
 atom: /[A-Z][A-Z0-9_]*/
