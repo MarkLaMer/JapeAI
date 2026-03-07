@@ -1,0 +1,18 @@
+[
+  "tests/test_ast.py::test_and_str",
+  "tests/test_ast.py::test_atom_str",
+  "tests/test_ast.py::test_formula_equality",
+  "tests/test_ast.py::test_imp_str",
+  "tests/test_ast.py::test_not_atom_str",
+  "tests/test_ast.py::test_not_complex_str",
+  "tests/test_parser.py::test_invalid_formula_double_and",
+  "tests/test_parser.py::test_invalid_formula_missing_operand",
+  "tests/test_parser.py::test_invalid_formula_unclosed_parenthesis",
+  "tests/test_parser.py::test_parse_atom",
+  "tests/test_parser.py::test_parse_conjunction",
+  "tests/test_parser.py::test_parse_implication",
+  "tests/test_parser.py::test_parse_negation",
+  "tests/test_parser.py::test_parse_parentheses",
+  "tests/test_parser.py::test_parse_precedence",
+  "tests/test_parser.py::test_parse_right_associative_implication"
+]
