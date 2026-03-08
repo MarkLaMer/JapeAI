@@ -1,6 +1,6 @@
 from parser.parser import parse_formula
 from search.state import SearchState
-from search.planner import bfs_plan
+from search.planner import bfs_plan, astar_plan
 
 
 def make_state(ctx_strings, goal_string):
@@ -10,25 +10,25 @@ def make_state(ctx_strings, goal_string):
 
 
 def test_search_assumption():
-    result = bfs_plan(make_state(["P"], "P"))
+    result = astar_plan(make_state(["P"], "P"))
     assert result.success
 
 
 def test_search_mp():
-    result = bfs_plan(make_state(["P", "P -> Q"], "Q"))
+    result = astar_plan(make_state(["P", "P -> Q"], "Q"))
     assert result.success
 
 
 def test_search_imp_intro():
-    result = bfs_plan(make_state([], "P -> P"))
+    result = astar_plan(make_state([], "P -> P"))
     assert result.success
 
 
 def test_search_and_intro():
-    result = bfs_plan(make_state(["P", "Q"], "P & Q"))
+    result = astar_plan(make_state(["P", "Q"], "P & Q"))
     assert result.success
 
 
 def test_search_failure():
-    result = bfs_plan(make_state(["P"], "Q"))
+    result = astar_plan(make_state(["P"], "Q"))
     assert not result.success

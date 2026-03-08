@@ -3,7 +3,7 @@ from logic.rules import prove
 from logic.proof_tree import print_proof
 
 from search.state import SearchState
-from search.planner import bfs_plan
+from search.planner import bfs_plan, astar_plan
 
 def run_case(context_strings: list[str], goal_string: str, max_depth: int = 10) -> None:
     context = {parse_formula(s) for s in context_strings}
@@ -39,7 +39,7 @@ def run_planner_case(context_strings: list[str], goal_string: str):
         depth=0,
     )
 
-    result = bfs_plan(initial)
+    result = astar_plan(initial)
 
     print("=" * 60)
     print("Context:", ", ".join(str(x) for x in context) if context else "{}")
