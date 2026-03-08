@@ -1,3 +1,15 @@
+
+
+
+# Repurpose it as:
+
+# - internal prototype for understanding search behavior
+# - comparison baseline in the report
+# - maybe support for the Bayesian/CSP sides
+
+
+
+
 from __future__ import annotations
 
 from collections import deque
