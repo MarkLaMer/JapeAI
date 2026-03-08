@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 import heapq # Instead of exploring in FIFO order like BFS, it explores the most promising state first
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import count
 from typing import Optional
 
@@ -17,7 +17,7 @@ class PlannerResult:
     visited_count: int
     final_state: Optional[SearchState] = None
 
-def formula_complexity(formula Formual) -> int:
+def formula_complexity(formula: Formula) -> int:
     """
     gives the heuristic some structural sense
     """
@@ -31,7 +31,7 @@ def formula_complexity(formula Formual) -> int:
         return 1 + formula_complexity(formula.left) + formula_complexity(formula.right)
     return 1
 
-def heuristics(state: SearchState) -> int:
+def heuristic(state: SearchState) -> int:
     """
     Estimate remaining work
     COmbines:
