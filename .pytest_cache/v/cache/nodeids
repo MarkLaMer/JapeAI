@@ -14,5 +14,17 @@
   "tests/test_parser.py::test_parse_negation",
   "tests/test_parser.py::test_parse_parentheses",
   "tests/test_parser.py::test_parse_precedence",
-  "tests/test_parser.py::test_parse_right_associative_implication"
+  "tests/test_parser.py::test_parse_right_associative_implication",
+  "tests/test_rules.py::test_and_elim_from_context",
+  "tests/test_rules.py::test_and_intro",
+  "tests/test_rules.py::test_assumption",
+  "tests/test_rules.py::test_chain_mp",
+  "tests/test_rules.py::test_failure_case",
+  "tests/test_rules.py::test_imp_intro",
+  "tests/test_rules.py::test_modus_ponens",
+  "tests/test_search.py::test_search_and_intro",
+  "tests/test_search.py::test_search_assumption",
+  "tests/test_search.py::test_search_failure",
+  "tests/test_search.py::test_search_imp_intro",
+  "tests/test_search.py::test_search_mp"
 ]
