@@ -172,7 +172,7 @@ Steps:
 1. open the editor
 2. load planning/domain.pddl
 3. load one of the generated problem files
-4. choose a planner such as LAMA-first or BFWS
+4. choose a planner (BFWS works well)
 5. run the solver
 
 Example expected plan:
@@ -237,8 +237,8 @@ The goal of this project is to explore different AI methods for automated theore
 
 Instead of relying on a single proof engine, JapeAI experiments with multiple perspectives:
 
-logic -> constraint satisfaction
-logic -> planning
-logic -> probabilistic reasoning
+*logic -> constraint satisfaction\
+logic -> planning\
+logic -> probabilistic reasoning*
 
 This allows comparison of different AI paradigms on the same logical reasoning task.
