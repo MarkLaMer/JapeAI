@@ -4,6 +4,18 @@ from dataclasses import dataclass
 from typing import Optional
 
 from parser.ast import Formula, Atom, And, Imp, Not
+from bayes.features import (
+    extract_formula_features,
+    extract_partial_features,
+    extract_rule_features,
+    extract_step_features,
+)
+from bayes.scorer import (
+    default_formula_scorer,
+    default_partial_scorer,
+    default_rule_scorer,
+    default_step_scorer,
+)
 
 
 # For now I am keeping the CSP rule set small and aligned
@@ -15,6 +27,23 @@ RULES = (
     "and_elim_left",
     "and_elim_right",
 )
+
+# Bayesian optimization toggles and guardrails.
+BN_ENABLE = True
+BN_FORMULA_REORDER = True
+BN_RULE_REORDER = True
+BN_STEP_REORDER = True
+BN_PARTIAL_CUTOFF = True
+
+# Conservative guardrails to avoid pruning small problems.
+BN_PARTIAL_CUTOFF_MIN_DOMAIN = 20
+BN_PARTIAL_SUCCESS_THRESHOLD = 0.03
+
+
+_FORMULA_SCORER = default_formula_scorer()
+_RULE_SCORER = default_rule_scorer()
+_STEP_SCORER = default_step_scorer()
+_PARTIAL_SCORER = default_partial_scorer()
 
 
 @dataclass(frozen=True)
@@ -38,6 +67,14 @@ class CSPStep:
     rule: str
     support1: Optional[Formula] = None
     support2: Optional[Formula] = None
+
+
+@dataclass
+class CSPStats:
+    nodes_expanded: int = 0
+    candidates_generated: int = 0
+    candidates_considered: int = 0
+    bayes_cutoffs: int = 0
 
 
 def formula_complexity(formula: Formula) -> int:
@@ -102,7 +139,12 @@ def collect_formulas(formula: Formula, out: set[Formula]) -> None:
         collect_formulas(formula.child, out)
 
 
-def candidate_formula_domain(assumptions: list[Formula], goal: Formula) -> list[Formula]:
+def candidate_formula_domain(
+    assumptions: list[Formula],
+    goal: Formula,
+    *,
+    use_bayes: bool = True,
+) -> list[Formula]:
     """
     Build the bounded set of formulas the CSP is allowed to use.
 
@@ -123,7 +165,33 @@ def candidate_formula_domain(assumptions: list[Formula], goal: Formula) -> list[
 
     # Sort to make the solver deterministic and easier to debug.
     # Simpler formulas first, then string order as a stable tie-breaker.
-    return sorted(formulas, key=lambda f: (formula_complexity(f), str(f)))
+    ordered = sorted(formulas, key=lambda f: (formula_complexity(f), str(f)))
+
+    bayes_enabled = BN_ENABLE and use_bayes
+
+    if not bayes_enabled or not BN_FORMULA_REORDER:
+        return ordered
+
+    # Bayesian reordering: push formulas that look more "useful" earlier.
+    scored: list[tuple[float, Formula]] = []
+    assumptions_set = set(assumptions)
+    for formula in ordered:
+        features = extract_formula_features(
+            formula,
+            is_goal=(formula == goal),
+            is_assumption=(formula in assumptions_set),
+        )
+        score = _FORMULA_SCORER.score(features, positive_label="useful")
+        scored.append((score, formula))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            formula_complexity(item[1]),
+            str(item[1]),
+        )
+    )
+    return [formula for _, formula in scored]
 
 
 def available_formulas(assumptions: list[Formula], steps: list[CSPStep]) -> list[Formula]:
@@ -291,6 +359,9 @@ def generate_candidate_steps(
     goal: Formula,
     prior_steps: list[CSPStep],
     formula_domain: list[Formula],
+    *,
+    use_bayes: bool = True,
+    stats: Optional[CSPStats] = None,
 ) -> list[CSPStep]:
     """
     Generate all locally valid next proof steps.
@@ -304,72 +375,104 @@ def generate_candidate_steps(
     available = available_formulas(assumptions, prior_steps)
 
     # Store all locally valid candidates here before sorting/deduping.
-    candidates: list[CSPStep] = []
+    scored_candidates: list[tuple[float, CSPStep]] = []
+
+    available_count = len(available)
+    depth = len(prior_steps)
+
+    bayes_enabled = BN_ENABLE and use_bayes
+
+    two_support_rules = ["modus_ponens", "and_intro"]
+    one_support_rules = ["and_elim_left", "and_elim_right"]
+
+    if bayes_enabled and BN_RULE_REORDER:
+        def rule_score(rule: str) -> float:
+            features = extract_rule_features(
+                rule=rule,
+                goal=goal,
+                available_count=available_count,
+                depth=depth,
+            )
+            return _RULE_SCORER.score(features, positive_label="success")
+
+        two_support_rules.sort(key=rule_score, reverse=True)
+        one_support_rules.sort(key=rule_score, reverse=True)
 
     # Try every possible result formula against every pair of available supports
     # for the 2-support rules.
     for result in formula_domain:
         for support1 in available:
             for support2 in available:
-                # Candidate MP step
-                mp_step = CSPStep(
-                    formula=result,
-                    rule="modus_ponens",
-                    support1=support1,
-                    support2=support2,
-                )
-                if step_is_locally_valid(mp_step, assumptions, prior_steps):
-                    candidates.append(mp_step)
+                for rule in two_support_rules:
+                    step = CSPStep(
+                        formula=result,
+                        rule=rule,
+                        support1=support1,
+                        support2=support2,
+                    )
+                    if not step_is_locally_valid(step, assumptions, prior_steps):
+                        continue
 
-                # Candidate conjunction introduction step
-                intro_step = CSPStep(
-                    formula=result,
-                    rule="and_intro",
-                    support1=support1,
-                    support2=support2,
-                )
-                if step_is_locally_valid(intro_step, assumptions, prior_steps):
-                    candidates.append(intro_step)
+                    if bayes_enabled and BN_STEP_REORDER:
+                        features = extract_step_features(
+                            step,
+                            goal=goal,
+                            available_count=available_count,
+                            depth=depth,
+                        )
+                        score = _STEP_SCORER.score(features, positive_label="success")
+                    else:
+                        score = 0.0
+                    scored_candidates.append((score, step))
 
     # Try the 1-support conjunction elimination rules.
     for result in formula_domain:
         for support1 in available:
-            left_step = CSPStep(
-                formula=result,
-                rule="and_elim_left",
-                support1=support1,
-            )
-            if step_is_locally_valid(left_step, assumptions, prior_steps):
-                candidates.append(left_step)
+            for rule in one_support_rules:
+                step = CSPStep(
+                    formula=result,
+                    rule=rule,
+                    support1=support1,
+                )
+                if not step_is_locally_valid(step, assumptions, prior_steps):
+                    continue
 
-            right_step = CSPStep(
-                formula=result,
-                rule="and_elim_right",
-                support1=support1,
-            )
-            if step_is_locally_valid(right_step, assumptions, prior_steps):
-                candidates.append(right_step)
+                if bayes_enabled and BN_STEP_REORDER:
+                    features = extract_step_features(
+                        step,
+                        goal=goal,
+                        available_count=available_count,
+                        depth=depth,
+                    )
+                    score = _STEP_SCORER.score(features, positive_label="success")
+                else:
+                    score = 0.0
+                scored_candidates.append((score, step))
 
     # Sort candidates to make the solver more predictable.
     # Heuristic:
     # - prefer steps that derive the goal
     # - then prefer simpler formulas
     # - then use string/rule tie-breakers for stability
-    candidates.sort(
-        key=lambda step: (
-            step.formula != goal,
-            formula_complexity(step.formula),
-            str(step.formula),
-            step.rule,
+    scored_candidates.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].formula != goal,
+            formula_complexity(item[1].formula),
+            str(item[1].formula),
+            item[1].rule,
         )
     )
+
+    if stats is not None:
+        stats.candidates_generated += len(scored_candidates)
 
     # Remove duplicates while preserving order.
     # This avoids trying the same exact step many times.
     unique: list[CSPStep] = []
     seen: set[CSPStep] = set()
 
-    for step in candidates:
+    for _, step in scored_candidates:
         if step not in seen:
             seen.add(step)
             unique.append(step)
@@ -381,6 +484,9 @@ def solve_bounded_csp(
     assumptions: list[Formula],
     goal: Formula,
     max_steps: int = 4,
+    *,
+    use_bayes: bool = True,
+    stats: Optional[CSPStats] = None,
 ) -> Optional[list[CSPStep]]:
     """
     Solve the proof task as a bounded CSP / backtracking search problem.
@@ -400,7 +506,9 @@ def solve_bounded_csp(
         return []
 
     # Build the finite domain of formulas the solver is allowed to reason about.
-    formula_domain = candidate_formula_domain(assumptions, goal)
+    bayes_enabled = BN_ENABLE and use_bayes
+
+    formula_domain = candidate_formula_domain(assumptions, goal, use_bayes=use_bayes)
 
     def backtrack(partial_steps: list[CSPStep]) -> Optional[list[CSPStep]]:
         """
@@ -412,6 +520,9 @@ def solve_bounded_csp(
         - generate all valid next steps
         - recursively try extending the proof
         """
+        if stats is not None:
+            stats.nodes_expanded += 1
+
         # Current knowledge = assumptions + formulas derived so far.
         current_available = available_formulas(assumptions, partial_steps)
 
@@ -423,12 +534,34 @@ def solve_bounded_csp(
         if len(partial_steps) >= max_steps:
             return None
 
+        # Bayesian early cutoff: prune low-probability branches on large domains.
+        if (
+            bayes_enabled
+            and BN_PARTIAL_CUTOFF
+            and len(formula_domain) >= BN_PARTIAL_CUTOFF_MIN_DOMAIN
+        ):
+            remaining_steps = max_steps - len(partial_steps)
+            features = extract_partial_features(
+                goal=goal,
+                available_count=len(current_available),
+                depth=len(partial_steps),
+                remaining_steps=remaining_steps,
+                goal_in_available=(goal in current_available),
+            )
+            success_prob = _PARTIAL_SCORER.score(features, positive_label="success")
+            if success_prob < BN_PARTIAL_SUCCESS_THRESHOLD:
+                if stats is not None:
+                    stats.bayes_cutoffs += 1
+                return None
+
         # Generate all possible next steps that satisfy the local constraints.
         candidates = generate_candidate_steps(
             assumptions=assumptions,
             goal=goal,
             prior_steps=partial_steps,
             formula_domain=formula_domain,
+            use_bayes=use_bayes,
+            stats=stats,
         )
 
         # Try each candidate step in turn.
@@ -438,6 +571,8 @@ def solve_bounded_csp(
             # This keeps the branching factor smaller.
             if candidate.formula in current_available:
                 continue
+            if stats is not None:
+                stats.candidates_considered += 1
 
             # Recurse with the candidate appended to the partial proof.
             result = backtrack(partial_steps + [candidate])
