@@ -3,242 +3,280 @@
 
 # JapeAI
 
-JapeAI is an experimental theorem-proving project that models propositional proof construction using multiple AI approaches.
+JapeAI is an experimental theorem-proving project that models propositional proof construction using three distinct AI approaches, run side-by-side on the same problems for comparison.
 
-The current approaches are:
-1. Constraint Satisfaction (CSP) for bounded proof skeleton search
-2. Classical Planning (PDDL) for modeling proofs as plans
-3. Bayesian guidance (planned but not implemented yet)
-
-At the moment the approaches are implemented in initial form.
+| Approach | File | Method |
+|---|---|---|
+| CSP | `csp/skeleton_csp.py` | Forward search with backtracking + Bayesian guidance |
+| Planning | `planning/` | PDDL encoding + internal forward BFS planner |
+| Backward prover | `logic/rules.py` | Goal-directed recursive backward chaining |
 
 ---
 
-# Logic Supported
-The current implementation supports a small fragment of propositional logic.
+## Logic Supported
 
 Formula types:
-- atoms: P, Q, R
-- conjunction: A & B
-- implication: A -> B
-- negation: ~A
 
-Inference rules currently implemented:
-- assumption
-- modus ponens
-- and introduction
-- and elimination (left)
-- and elimination (right)
+| Syntax | Meaning |
+|---|---|
+| `P`, `Q`, `R` | Atomic propositions (uppercase) |
+| `A & B` | Conjunction |
+| `A -> B` | Implication |
+| `~A` | Negation |
 
-This restricted fragment is intentional to keep the CSP and planning approaches manageable.
+Inference rules:
 
-# Setup
+- Assumption
+- Modus Ponens
+- And Introduction
+- And Elimination (left / right)
+- **Implication Introduction** — assume antecedent, derive consequent, discharge hypothesis
 
-1. Clone the repository
+---
 
-```
+## Setup
+
+**Windows (PowerShell):**
+```powershell
 git clone <repo-url>
-cd japeai
-```
-
-2. Create a virtual environment
-
-Windows:
-```
+cd JapeAI
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-Mac/Linux
-```
+**Mac / Linux:**
+```bash
+git clone <repo-url>
+cd JapeAI
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-3. Install dependencies
-```
 pip install -r requirements.txt
 ```
 
 ---
 
-# Approach 1: CSP (Constraint Satisfaction)
+## Running the CLI
 
-The CSP approach models proof construction as a bounded constraint problem.
-
-Idea:
-- each proof step is a variable
-- each variable chooses a derived formula and rule
-- constraints enforce rule correctness
-- a bounded search finds a valid proof skeleton
-
-Main file:
-`csp/skeleton_csp.py`
-
-The solver:
-- builds a finite domain of formulas from assumptions + goal + subformulas
-- generates candidate proof steps
-- checks rule constraints
-- performs bounded backtracking search
-
-### Example problems the CSP solver can handle:
-
-`prove Q from {P, P -> Q}`
-
-`prove P from {P & Q}`
-
-`prove P & Q from {P, Q}`
-
-`prove R from {P, P -> Q, Q -> R}`
-
-### Example usage:
+### Interactive mode (default)
 ```
+python main.py
+```
+You are prompted for assumptions and a goal. All three solvers run and print their proofs side-by-side.
+
+```
+Assumptions (comma-separated, or blank): P, P -> Q, Q -> R
+Goal: R
+Write PDDL file? [y/N]: n
+
+============================================================
+Assumptions : ['P', '(P -> Q)', '(Q -> R)']
+Goal        : R
+============================================================
+
+[CSP solver]
+  Proof (2 top-level step(s)):
+    Step 0: Q  by modus_ponens, P, (P -> Q)
+    Step 1: R  by modus_ponens, (Q -> R), Q
+
+[Internal PDDL planner]
+  Plan (2 steps):
+    1. modus-ponens(P, Q, (P -> Q))
+    2. modus-ponens(Q, R, (Q -> R))
+
+[Backward logic prover]
+  Proof tree:
+  R         by MP
+   Q         by MP
+    P         by Assumption
+    (P -> Q)         by Given
+   (Q -> R)         by Given
+```
+
+### Demo mode
+```
+python main.py --demo
+```
+Runs 8 built-in problems covering all rule types including ImpIntro, long chains, and unprovable cases.
+
+---
+
+## Formula Syntax Reference
+
+```
+Atoms       P  Q  R  ABC           uppercase identifiers
+Negation    ~P
+Conjunction P & Q
+Implication P -> Q                 right-associative
+Grouping    (P & Q) -> R
+```
+
+Examples of valid goals:
+```
+P -> P
+(P & Q) -> (Q & P)
+P -> (Q -> P)
+R
+```
+
+---
+
+## Approach 1: CSP (Constraint Satisfaction)
+
+**File:** `csp/skeleton_csp.py`
+
+Models proof construction as a bounded constraint problem:
+- each proof step is a variable that can take values from a finite formula domain
+- constraints enforce rule correctness at each step
+- backtracking search finds a valid proof skeleton
+
+**Key features:**
+- `solve_csp()` — iterative deepening wrapper; automatically finds the shortest proof without needing to guess a step bound
+- `solve_bounded_csp()` — fixed-depth version for when you know the bound
+- **Implication Introduction** — handled as a recursive sub-proof: to prove `A → B`, the solver assumes `A` and proves `B` in a nested scope, then discharges the hypothesis
+- Bayesian guidance — optional reordering and pruning of candidates using Naive Bayes scores (formula usefulness, rule success, partial proof success probability)
+
+**Example problems:**
+
+| Problem | Assumptions | Goal |
+|---|---|---|
+| Modus Ponens | `P`, `P -> Q` | `Q` |
+| AND elimination | `P & Q` | `P` |
+| Chain | `P`, `P->Q`, `Q->R`, `R->S` | `S` |
+| ImpIntro (tautology) | _(none)_ | `P -> P` |
+| AND commutativity | _(none)_ | `(P & Q) -> (Q & P)` |
+| K tautology | _(none)_ | `P -> (Q -> P)` |
+
+**Programmatic usage:**
+```python
 from parser.parser import parse_formula
-from csp.skeleton_csp import solve_bounded_csp
+from csp.skeleton_csp import solve_csp, print_csp_proof
 
-assumptions = [
-    parse_formula("P"),
-    parse_formula("P -> Q"),
-]
-
+assumptions = [parse_formula("P"), parse_formula("P -> Q")]
 goal = parse_formula("Q")
 
-solution = solve_bounded_csp(assumptions, goal, max_steps=2)
-
-print(solution)
+result = solve_csp(assumptions, goal)
+print_csp_proof(result)
 ```
 
-# Approach 2: Planning (PDDL)
+---
 
-The planning approach models theorem proving as a classical planning problem.
+## Approach 2: Planning (PDDL)
 
-Conceptual mapping:
+**Files:** `planning/domain.pddl`, `planning/encoder.py`, `planning/internal_planner.py`
 
-state = known formulas
+Models theorem proving as a classical planning problem:
+
+```
+state   = set of known formulas
 actions = inference rules
-goal = target theorem
-
-Files involved:
-`planning/domain.pddl`
-`planning/encoder.py`
-`planning/problems/`
-
-The encoder automatically converts a theorem proving task into a PDDL problem file.
-
-### Example:
-`assumptions = [P, P -> Q]`
-`goal = Q`
-
-This becomes a planning problem where the planner must derive Q.
-
-
-### Generating a PDDL Problem
-
-Example Python code:
+goal    = target theorem is known
 ```
+
+### Internal planner
+
+`planning/internal_planner.py` implements a forward BFS planner that works directly on `Formula` objects — no external tool needed.
+
+```python
+from parser.parser import parse_formula
+from planning.internal_planner import plan_and_print
+
+plan_and_print(
+    [parse_formula("P"), parse_formula("P -> Q")],
+    parse_formula("Q"),
+)
+```
+
+### External PDDL planner
+
+Generate a `.pddl` problem file and load it into any STRIPS planner:
+
+```python
 from parser.parser import parse_formula
 from planning.encoder import write_problem_file
 
-assumptions = [
-    parse_formula("P"),
-    parse_formula("P -> Q")
-]
-
-goal = parse_formula("Q")
-
 write_problem_file(
-    "planning/problems/prove_q_from_p_imp_q.pddl",
-    "prove-q-from-p-imp-q",
-    assumptions,
-    goal
+    "planning/problems/my_problem.pddl",
+    "my-problem",
+    [parse_formula("P"), parse_formula("P -> Q")],
+    parse_formula("Q"),
 )
 ```
-Then run:
 
-`python main.py`
+Then open [editor.planning.domains](https://editor.planning.domains/), load `planning/domain.pddl` and your problem file, and run BFWS.
 
-A problem file will appear in:
-
-`planning/problems/`
-
-
-### Running the Planning 
-
-You can test the planning model using the online PDDL editor:
-
-https://editor.planning.domains/
-
-Steps:
-1. open the editor
-2. load planning/domain.pddl
-3. load one of the generated problem files
-4. choose a planner (BFWS works well)
-5. run the solver
-
-Example expected plan:
-
-`(modus-ponens f_p f_q f_imp_p_q)`
-
-This corresponds to deriving Q from P and (P -> Q).
-
-### Example PDDL Problems
-
-`planning/problems/prove_q_from_p_imp_q.pddl`
-
-prove Q from {P, P -> Q}
-
-`planning/problems/prove_p_from_p_and_q.pddl`
-
-prove P from {P & Q}
-
-`planning/problems/prove_p_and_q_from_p_q.pddl`
-
-prove P & Q from {P, Q}
-
-
-# Approach 3: Bayesian Networks
-
-A future extension of the system will use Bayesian scoring to guide proof search.
-
-### Idea
-Estimate probability that a rule application will lead to a successful proof.
-
-Possible features:
-- rule type
-- current goal structure
-- context size
-- search depth
-
-Current placeholder files:
-
-`bayes/features.py`
-`bayes/scorer.py`
-`bayes/trainer.py`
-
-This part of the system is not yet implemented.
+**PDDL domain actions:** `modus-ponens`, `and-elim-left`, `and-elim-right`, `and-intro`, `imp-intro-weaken`
 
 ---
 
-# Running Tests
-Run all tests with `pytest`.
+## Approach 3: Backward Logic Prover
 
-Tests currently cover:
-- AST correctness
-- formula parsing
-- rule matching
-- search behavior
+**File:** `logic/rules.py`
 
-Additional tests will be added for CSP and planning.
+Goal-directed recursive backward chaining. Supports all five rules including full Implication Introduction (scoped hypothetical reasoning).
+
+```python
+from parser.parser import parse_formula
+from logic.rules import prove
+from logic.proof_tree import print_proof
+
+result = prove(parse_formula("(P & Q) -> (Q & P)"), set())
+print_proof(result)
+```
 
 ---
 
-# Project Goal
-The goal of this project is to explore different AI methods for automated theorem proving.
+## Bayesian Guidance
 
-Instead of relying on a single proof engine, JapeAI experiments with multiple perspectives:
+**Files:** `bayes/features.py`, `bayes/scorer.py`, `bayes/trainer.py`
 
-*logic -> constraint satisfaction\
-logic -> planning\
-logic -> probabilistic reasoning*
+A Naive Bayes scoring layer integrated into the CSP solver. Four configurable scorers guide the search:
 
-This allows comparison of different AI paradigms on the same logical reasoning task.
+| Toggle | Effect |
+|---|---|
+| `BN_FORMULA_REORDER` | Reorder the formula domain by predicted usefulness |
+| `BN_RULE_REORDER` | Try rules in order of predicted success probability |
+| `BN_STEP_REORDER` | Rank candidate steps by predicted success |
+| `BN_PARTIAL_CUTOFF` | Prune branches with very low success probability |
+
+These are on by default and can be toggled at the top of `csp/skeleton_csp.py`.
+
+---
+
+## Running Tests
+
+```
+pytest
+```
+
+48 tests covering parser, AST, logic rules, CSP (forward rules + ImpIntro + iterative deepening + longer chains), search (A* and BFS), and the internal PDDL planner.
+
+```
+pytest -v              # verbose output
+pytest tests/test_csp.py   # CSP tests only
+```
+
+---
+
+## Project Structure
+
+```
+parser/         formula parser and AST
+logic/          backward prover, matcher, proof tree
+csp/            CSP solver with Bayesian guidance
+planning/       PDDL domain, encoder, internal planner
+search/         A* and BFS search over proof states
+bayes/          Naive Bayes feature extraction and scoring
+tests/          pytest test suite
+main.py         interactive CLI and demo runner
+```
+
+---
+
+## Project Goal
+
+Explore and compare three AI paradigms applied to the same logical reasoning task:
+
+> logic → constraint satisfaction  
+> logic → classical planning  
+> logic → probabilistic guidance

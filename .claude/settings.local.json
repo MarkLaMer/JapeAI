@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.py$|\\\\.md$|\\\\.txt$\")",
+      "Bash(python -m pytest tests/test_csp.py -v)",
+      "Bash(python3 -m pytest tests/test_csp.py -v)",
+      "Bash(pip3 install:*)",
+      "Bash(.venv/bin/python:*)"
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Union
 
 from parser.ast import Formula, Atom, And, Imp, Not
 from bayes.features import (
@@ -18,9 +18,8 @@ from bayes.scorer import (
 )
 
 
-# For now I am keeping the CSP rule set small and aligned
-# with the same fragment used in the PDDL model.
-# That way the three approaches are easier to compare fairly.
+# Rule set: forward rules operate on available formulas to derive new ones.
+# imp_intro is handled structurally (not as a forward rule) — see solve logic.
 RULES = (
     "modus_ponens",
     "and_intro",
@@ -39,6 +38,13 @@ BN_PARTIAL_CUTOFF = True
 BN_PARTIAL_CUTOFF_MIN_DOMAIN = 20
 BN_PARTIAL_SUCCESS_THRESHOLD = 0.03
 
+# Maximum nesting depth for implication introduction.
+# Each imp_intro creates a hypothetical sub-proof; excessive nesting is pruned.
+IMP_INTRO_MAX_DEPTH = 6
+
+# Iterative deepening bounds.
+IMP_SOLVE_MAX_STEPS = 12
+
 
 _FORMULA_SCORER = default_formula_scorer()
 _RULE_SCORER = default_rule_scorer()
@@ -49,7 +55,7 @@ _PARTIAL_SCORER = default_partial_scorer()
 @dataclass(frozen=True)
 class CSPStep:
     """
-    One proof step in the CSP model.
+    One forward proof step in the CSP model.
 
     Fields:
     - formula: the formula derived at this step
@@ -67,6 +73,30 @@ class CSPStep:
     rule: str
     support1: Optional[Formula] = None
     support2: Optional[Formula] = None
+
+
+@dataclass(frozen=True)
+class CSPImpIntroStep:
+    """
+    An implication introduction step.
+
+    To prove Imp(antecedent, consequent):
+    1. Temporarily add `antecedent` as a hypothesis.
+    2. Derive `consequent` via `sub_steps` (a nested proof).
+    3. Discharge the hypothesis, concluding `formula = Imp(antecedent, consequent)`.
+
+    This mirrors the natural deduction ImpIntro rule and enables proofs
+    of the form A → B that the flat forward rules cannot reach.
+    """
+    antecedent: Formula
+    consequent: Formula
+    sub_steps: tuple  # tuple[CSPProofStep, ...]
+    formula: Formula  # always == Imp(antecedent, consequent)
+    rule: str = field(default="imp_intro")
+
+
+# A proof step is either a flat forward step or a scoped ImpIntro block.
+CSPProofStep = Union[CSPStep, CSPImpIntroStep]
 
 
 @dataclass
@@ -194,13 +224,16 @@ def candidate_formula_domain(
     return [formula for _, formula in scored]
 
 
-def available_formulas(assumptions: list[Formula], steps: list[CSPStep]) -> list[Formula]:
+def available_formulas(assumptions: list[Formula], steps: list[CSPProofStep]) -> list[Formula]:
     """
     Return all formulas currently available at this point in the proof.
 
     Available formulas include:
     - original assumptions
-    - formulas derived by previous CSP steps
+    - formulas derived by previous CSP steps (both CSPStep and CSPImpIntroStep)
+
+    For CSPImpIntroStep, only the resulting implication formula is available
+    in the outer context; the sub-steps are scoped to the hypothetical proof.
 
     I return a list instead of a set because I want stable order
     when debugging / printing / iterating.
@@ -213,6 +246,7 @@ def available_formulas(assumptions: list[Formula], steps: list[CSPStep]) -> list
             seen.append(formula)
 
     # Add each derived formula in proof order.
+    # step.formula works for both CSPStep and CSPImpIntroStep.
     for step in steps:
         if step.formula not in seen:
             seen.append(step.formula)
@@ -279,7 +313,7 @@ def can_apply_and_elim_right(result: Formula, support1: Formula) -> bool:
     return isinstance(support1, And) and support1.right == result
 
 
-def step_is_locally_valid(step: CSPStep, assumptions: list[Formula], prior_steps: list[CSPStep]) -> bool:
+def step_is_locally_valid(step: CSPStep, assumptions: list[Formula], prior_steps: list[CSPProofStep]) -> bool:
     """
     Check whether one candidate proof step is locally legal.
 
@@ -357,19 +391,21 @@ def step_is_locally_valid(step: CSPStep, assumptions: list[Formula], prior_steps
 def generate_candidate_steps(
     assumptions: list[Formula],
     goal: Formula,
-    prior_steps: list[CSPStep],
+    prior_steps: list[CSPProofStep],
     formula_domain: list[Formula],
     *,
     use_bayes: bool = True,
     stats: Optional[CSPStats] = None,
 ) -> list[CSPStep]:
     """
-    Generate all locally valid next proof steps.
+    Generate all locally valid next proof steps (forward rules only).
 
     This is where the CSP domains and constraints come together:
     - formula_domain gives the possible formulas
     - available formulas give possible supports
     - step_is_locally_valid filters candidates by rule constraints
+
+    ImpIntro is handled separately in the solve logic, not here.
     """
     # Figure out what formulas are usable right now.
     available = available_formulas(assumptions, prior_steps)
@@ -480,57 +516,132 @@ def generate_candidate_steps(
     return unique
 
 
-def solve_bounded_csp(
+def _imp_intro_candidates(
     assumptions: list[Formula],
     goal: Formula,
-    max_steps: int = 4,
+    partial_steps: list[CSPProofStep],
+    formula_domain: list[Formula],
+    remaining_budget: int,
+    use_bayes: bool,
+    stats: Optional[CSPStats],
+    imp_depth: int,
+) -> list[CSPImpIntroStep]:
+    """
+    Generate imp_intro candidates for Imp-typed formulas in the domain.
+
+    For each Imp(A, B) in the formula domain that is not yet available:
+    - Augment the current available set with hypothesis A
+    - Try to prove B within `remaining_budget` steps
+    - If successful, wrap the sub-proof as a CSPImpIntroStep
+
+    This enables intermediate implication introductions, not just goal-level ones.
+    For example, to prove (P & ((P&Q) -> (Q&P))), the second conjunct
+    (P&Q) -> (Q&P) is an intermediate Imp formula proved via imp_intro.
+    """
+    if imp_depth >= IMP_INTRO_MAX_DEPTH or remaining_budget <= 0:
+        return []
+
+    current_available = available_formulas(assumptions, partial_steps)
+    candidates: list[CSPImpIntroStep] = []
+
+    for imp_formula in formula_domain:
+        if not isinstance(imp_formula, Imp):
+            continue
+        if imp_formula in current_available:
+            continue
+
+        antecedent = imp_formula.left
+        consequent = imp_formula.right
+
+        # Build hypothetical context: current available formulas + antecedent.
+        hyp_assumptions: list[Formula] = list(current_available)
+        if antecedent not in current_available:
+            hyp_assumptions.append(antecedent)
+
+        # Try to prove the consequent from the hypothetical context.
+        sub_result = _solve_bounded_csp(
+            hyp_assumptions,
+            consequent,
+            remaining_budget,
+            use_bayes=use_bayes,
+            stats=stats,
+            imp_depth=imp_depth + 1,
+        )
+
+        if sub_result is not None:
+            candidates.append(
+                CSPImpIntroStep(
+                    antecedent=antecedent,
+                    consequent=consequent,
+                    sub_steps=tuple(sub_result),
+                    formula=imp_formula,
+                )
+            )
+
+    return candidates
+
+
+def _solve_bounded_csp(
+    assumptions: list[Formula],
+    goal: Formula,
+    max_steps: int,
     *,
     use_bayes: bool = True,
     stats: Optional[CSPStats] = None,
-) -> Optional[list[CSPStep]]:
+    imp_depth: int = 0,
+) -> Optional[list[CSPProofStep]]:
     """
-    Solve the proof task as a bounded CSP / backtracking search problem.
+    Internal recursive solver.  Public callers use solve_bounded_csp or solve_csp.
 
-    Interpretation:
-    - each proof step position is like a CSP variable
-    - each variable can take values from the candidate step domain
-    - local rule checks act like constraints
-    - max_steps bounds the proof length
-
-    Returns:
-    - a list of CSPStep objects if a proof skeleton is found
-    - None if no proof is found within the bound
+    imp_depth tracks how deep we are in nested ImpIntro calls to prevent
+    unbounded recursion on problems with many nested implications.
     """
-    # Trivial case: if the goal is already assumed, no derived steps are needed.
+    # Trivial case: goal is already assumed, no derived steps needed.
     if goal in assumptions:
         return []
 
-    # Build the finite domain of formulas the solver is allowed to reason about.
-    bayes_enabled = BN_ENABLE and use_bayes
+    # ImpIntro: if the goal is A -> B, try to prove B by assuming A.
+    # This is the natural deduction implication introduction rule.
+    # We try this BEFORE the forward search so that proofs like
+    #   ⊢ P → P   or   ⊢ (P & Q) → (Q & P)
+    # are found without needing any forward steps at all.
+    if isinstance(goal, Imp) and imp_depth < IMP_INTRO_MAX_DEPTH:
+        antecedent = goal.left
+        consequent = goal.right
+        augmented = [*assumptions, antecedent] if antecedent not in assumptions else assumptions
 
+        sub_result = _solve_bounded_csp(
+            augmented,
+            consequent,
+            max_steps,  # ImpIntro itself costs no forward steps
+            use_bayes=use_bayes,
+            stats=stats,
+            imp_depth=imp_depth + 1,
+        )
+        if sub_result is not None:
+            intro = CSPImpIntroStep(
+                antecedent=antecedent,
+                consequent=consequent,
+                sub_steps=tuple(sub_result),
+                formula=goal,
+            )
+            return [intro]
+
+    # Build the finite domain of formulas the solver may reason about.
+    bayes_enabled = BN_ENABLE and use_bayes
     formula_domain = candidate_formula_domain(assumptions, goal, use_bayes=use_bayes)
 
-    def backtrack(partial_steps: list[CSPStep]) -> Optional[list[CSPStep]]:
-        """
-        Recursive backtracking search over partial proof skeletons.
-
-        At each call:
-        - check if the goal is already available
-        - stop if we reached the step bound
-        - generate all valid next steps
-        - recursively try extending the proof
-        """
+    def backtrack(partial_steps: list[CSPProofStep]) -> Optional[list[CSPProofStep]]:
         if stats is not None:
             stats.nodes_expanded += 1
 
-        # Current knowledge = assumptions + formulas derived so far.
         current_available = available_formulas(assumptions, partial_steps)
 
-        # Success condition: goal has been derived.
+        # Success: goal has been derived.
         if goal in current_available:
             return partial_steps
 
-        # Fail if we already used up the allowed number of proof steps.
+        # Fail: used up the allowed number of steps.
         if len(partial_steps) >= max_steps:
             return None
 
@@ -554,35 +665,119 @@ def solve_bounded_csp(
                     stats.bayes_cutoffs += 1
                 return None
 
-        # Generate all possible next steps that satisfy the local constraints.
-        candidates = generate_candidate_steps(
+        # Generate all possible forward steps (MP, AND-INTRO, AND-ELIM).
+        candidates: list[CSPProofStep] = list(generate_candidate_steps(
             assumptions=assumptions,
             goal=goal,
             prior_steps=partial_steps,
             formula_domain=formula_domain,
             use_bayes=use_bayes,
             stats=stats,
-        )
+        ))
+
+        # Also generate intermediate imp_intro candidates for Imp-typed sub-goals.
+        # We do this after forward candidates so forward rules are tried first,
+        # and only when there is enough remaining budget to make a sub-proof.
+        remaining_budget = max_steps - len(partial_steps) - 1
+        if imp_depth < IMP_INTRO_MAX_DEPTH and remaining_budget > 0:
+            intro_candidates = _imp_intro_candidates(
+                assumptions=assumptions,
+                goal=goal,
+                partial_steps=partial_steps,
+                formula_domain=formula_domain,
+                remaining_budget=remaining_budget,
+                use_bayes=use_bayes,
+                stats=stats,
+                imp_depth=imp_depth + 1,
+            )
+            candidates.extend(intro_candidates)
 
         # Try each candidate step in turn.
         for candidate in candidates:
-            # Extra pruning:
-            # if a candidate does not add a genuinely new formula, skip it.
-            # This keeps the branching factor smaller.
+            # Extra pruning: skip candidates that don't add a new formula.
             if candidate.formula in current_available:
                 continue
             if stats is not None:
                 stats.candidates_considered += 1
 
-            # Recurse with the candidate appended to the partial proof.
             result = backtrack(partial_steps + [candidate])
-
-            # If a recursive branch succeeds, return that proof immediately.
             if result is not None:
                 return result
 
-        # If none of the candidates worked, backtrack.
         return None
 
-    # Start the recursive search from an empty proof skeleton.
     return backtrack([])
+
+
+def solve_bounded_csp(
+    assumptions: list[Formula],
+    goal: Formula,
+    max_steps: int = 8,
+    *,
+    use_bayes: bool = True,
+    stats: Optional[CSPStats] = None,
+) -> Optional[list[CSPProofStep]]:
+    """
+    Solve the proof task as a bounded CSP / backtracking search problem.
+
+    Supports:
+    - modus_ponens, and_intro, and_elim_left, and_elim_right (forward rules)
+    - imp_intro (implication introduction via hypothetical sub-proofs)
+
+    Returns:
+    - a list of CSPProofStep objects if a proof skeleton is found
+    - None if no proof is found within the bound
+    """
+    return _solve_bounded_csp(
+        assumptions, goal, max_steps,
+        use_bayes=use_bayes, stats=stats, imp_depth=0,
+    )
+
+
+def solve_csp(
+    assumptions: list[Formula],
+    goal: Formula,
+    *,
+    max_bound: int = IMP_SOLVE_MAX_STEPS,
+    use_bayes: bool = True,
+    stats: Optional[CSPStats] = None,
+) -> Optional[list[CSPProofStep]]:
+    """
+    Iterative deepening CSP solver.
+
+    Tries max_steps = 0, 1, 2, ... up to max_bound.
+    Returns the shortest proof found (fewest forward steps / intro blocks).
+
+    This eliminates the need to manually guess max_steps and ensures
+    completeness within the step bound.
+    """
+    for max_steps in range(max_bound + 1):
+        result = _solve_bounded_csp(
+            assumptions, goal, max_steps,
+            use_bayes=use_bayes, stats=stats, imp_depth=0,
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def print_csp_proof(
+    steps: list[CSPProofStep],
+    indent: int = 0,
+) -> None:
+    """
+    Pretty-print a CSP proof, indenting nested ImpIntro sub-proofs.
+    """
+    pad = "  " * indent
+    for i, step in enumerate(steps):
+        if isinstance(step, CSPImpIntroStep):
+            print(f"{pad}[assume {step.antecedent}]")
+            if step.sub_steps:
+                print_csp_proof(list(step.sub_steps), indent + 1)
+            else:
+                print(f"{pad}  (goal follows directly from hypothesis)")
+            print(f"{pad}[∴ {step.formula} by imp_intro]")
+        else:
+            s1 = f", {step.support1}" if step.support1 is not None else ""
+            s2 = f", {step.support2}" if step.support2 is not None else ""
+            print(f"{pad}Step {i}: {step.formula}  by {step.rule}{s1}{s2}")

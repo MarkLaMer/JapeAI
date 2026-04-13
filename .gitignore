@@ -1,11 +1,18 @@
 # Python
-.venv/
 __pycache__/
-.pytest_cache/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
 
 # Node
 node_modules/
+
+# pytest
+.pytest_cache/
 
 # OS / editor
 .vscode/
