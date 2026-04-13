@@ -30,7 +30,7 @@ Inference rules:
 - Modus Ponens
 - And Introduction
 - And Elimination (left / right)
-- **Implication Introduction** — assume antecedent, derive consequent, discharge hypothesis
+- **Implication Introduction** - assume antecedent, derive consequent, discharge hypothesis
 
 ---
 
@@ -131,10 +131,10 @@ Models proof construction as a bounded constraint problem:
 - backtracking search finds a valid proof skeleton
 
 **Key features:**
-- `solve_csp()` — iterative deepening wrapper; automatically finds the shortest proof without needing to guess a step bound
-- `solve_bounded_csp()` — fixed-depth version for when you know the bound
-- **Implication Introduction** — handled as a recursive sub-proof: to prove `A → B`, the solver assumes `A` and proves `B` in a nested scope, then discharges the hypothesis
-- Bayesian guidance — optional reordering and pruning of candidates using Naive Bayes scores (formula usefulness, rule success, partial proof success probability)
+- `solve_csp()` - iterative deepening wrapper; automatically finds the shortest proof without needing to guess a step bound
+- `solve_bounded_csp()` - fixed-depth version for when you know the bound
+- **Implication Introduction** - handled as a recursive sub-proof: to prove `A -> B`, the solver assumes `A` and proves `B` in a nested scope, then discharges the hypothesis
+- Bayesian guidance - optional reordering and pruning of candidates using Naive Bayes scores (formula usefulness, rule success, partial proof success probability)
 
 **Example problems:**
 
@@ -175,7 +175,7 @@ goal    = target theorem is known
 
 ### Internal planner
 
-`planning/internal_planner.py` implements a forward BFS planner that works directly on `Formula` objects — no external tool needed.
+`planning/internal_planner.py` implements a forward BFS planner that works directly on `Formula` objects - no external tool needed.
 
 ```python
 from parser.parser import parse_formula
@@ -277,6 +277,6 @@ main.py         interactive CLI and demo runner
 
 Explore and compare three AI paradigms applied to the same logical reasoning task:
 
-> logic → constraint satisfaction  
-> logic → classical planning  
-> logic → probabilistic guidance
+> logic -> constraint satisfaction
+> logic -> classical planning
+> logic -> probabilistic guidance
