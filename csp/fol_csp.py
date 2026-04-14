@@ -633,7 +633,7 @@ def render_fol_csp_steps(
 
         if isinstance(step, FOLForAllIntroStep):
             lines.append((depth, f"[ ∀-introduce  {step.var} ↦ {step.const_name} ]",
-                          "scope", None))
+                          "premise", None))
             render_fol_csp_steps(list(step.sub_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "∀ intro",
                           f"{step.var}↦{step.const_name}"))
@@ -646,13 +646,13 @@ def render_fol_csp_steps(
         elif isinstance(step, FOLExistsElimStep):
             lines.append((depth,
                           f"[ ∃-eliminate  {step.elim_formula}  ↦  {step.const_name} ]",
-                          "scope", None))
+                          "premise", None))
             render_fol_csp_steps(list(step.sub_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "∃ elim",
                           f"{step.const_name}"))
 
         elif isinstance(step, FOLOrElimStep):
-            lines.append((depth, f"[ ∨-cases  {step.or_formula} ]", "scope", None))
+            lines.append((depth, f"[ ∨-cases  {step.or_formula} ]", "premise", None))
             lines.append((depth + 1, f"[ case  {step.or_formula.left} ]", "hyp", None))
             render_fol_csp_steps(list(step.left_steps), lines, depth + 2)
             lines.append((depth + 1, f"[ case  {step.or_formula.right} ]", "hyp", None))

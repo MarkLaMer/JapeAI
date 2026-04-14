@@ -27,6 +27,11 @@ _FALSE = Atom("⊥")
 # ---------------------------------------------------------------------------
 # Fresh constant generator
 # ---------------------------------------------------------------------------
+# Names cycle through i, j, k first (Jape convention), then the rest of the
+# alphabet, then i0, j0, k0, i1, … for overflow.
+_FRESH_SEQ = ['i', 'j', 'k', 'a', 'b', 'c', 'd', 'e', 'f', 'g',
+              'h', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+              'u', 'v', 'w', 'x', 'y', 'z']
 _counter: list[int] = [0]
 
 
@@ -35,9 +40,14 @@ def reset_fresh() -> None:
 
 
 def _fresh() -> Var:
-    name = f"_c{_counter[0]}"
+    n = _counter[0]
     _counter[0] += 1
-    return Var(name)
+    if n < len(_FRESH_SEQ):
+        return Var(_FRESH_SEQ[n])
+    overflow = n - len(_FRESH_SEQ)
+    suffix = overflow // 3
+    base   = ['i', 'j', 'k'][overflow % 3]
+    return Var(f"{base}{suffix}")
 
 
 # ---------------------------------------------------------------------------

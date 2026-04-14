@@ -152,6 +152,8 @@ class JapeAIApp:
 
         self._solver_var = tk.StringVar(value="csp")
         self._status_var = tk.StringVar(value="Enter a problem and press Prove.")
+        self._last_proof_lines: list = []   # (depth, formula, rule, note) tuples
+        self._last_sequent: str = ""
 
         self._build_menu()
         self._build_toolbar()
@@ -166,12 +168,15 @@ class JapeAIApp:
 
         # -- File ------------------------------------------------------------
         file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Copy Proof", command=self._on_copy,
+                              accelerator="Ctrl+C")
         file_menu.add_command(label="Clear",  command=self._on_clear,
                               accelerator="Ctrl+L")
         file_menu.add_separator()
         file_menu.add_command(label="Quit",   command=self.root.destroy,
                               accelerator="Ctrl+Q")
         menubar.add_cascade(label="File", menu=file_menu)
+        self.root.bind_all("<Control-c>", lambda _: self._on_copy())
         self.root.bind_all("<Control-l>", lambda _: self._on_clear())
         self.root.bind_all("<Control-q>", lambda _: self.root.destroy())
 
@@ -311,6 +316,14 @@ class JapeAIApp:
             cursor="hand2", command=self._on_clear,
         ).pack(side=tk.LEFT)
 
+        self._copy_btn = tk.Button(
+            inner, text="Copy Proof", font=FONT_TOOLBAR,
+            bg=BG_TOOLBAR, relief=tk.GROOVE, padx=8, pady=3,
+            cursor="hand2", command=self._on_copy,
+            state=tk.DISABLED,
+        )
+        self._copy_btn.pack(side=tk.LEFT, padx=(4, 0))
+
         # Status (right-aligned)
         self._status_label = tk.Label(
             inner, textvariable=self._status_var,
@@ -449,9 +462,29 @@ class JapeAIApp:
         self._goal_entry.delete(0, tk.END)
         self._clear_proof()
         self._clear_given()
+        self._last_proof_lines = []
+        self._last_sequent = ""
+        self._copy_btn.configure(state=tk.DISABLED)
         self._set_status("Enter a problem and press Prove.")
         self.root.title("JapeAI")
         self._proof_header.configure(text="Proof")
+
+    def _on_copy(self) -> None:
+        if not self._last_proof_lines:
+            return
+        INDENT = "    "
+        parts = [self._last_sequent, ""]
+        for depth, formula, rule, note in self._last_proof_lines:
+            pad = INDENT * depth
+            if rule in ("hyp", "premise"):
+                parts.append(f"{pad}{formula}")
+            else:
+                n = f"  [{note}]" if note else ""
+                parts.append(f"{pad}{formula}   ({rule}){n}")
+        text = "\n".join(parts)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status("Proof copied to clipboard.", color=C_HYP)
 
     def _load_example(self, assumptions: list[str], goal: str) -> None:
         self._assumptions_entry.delete(0, tk.END)
@@ -466,6 +499,12 @@ class JapeAIApp:
     def _display_proof(
         self, lines: list, assumptions, goal, elapsed: float, solver: str,
     ) -> None:
+        self._last_proof_lines = lines
+        self._last_sequent = (
+            (", ".join(str(a) for a in assumptions) + "  ⊢  " if assumptions else "⊢  ")
+            + str(goal)
+        )
+        self._copy_btn.configure(state=tk.NORMAL)
         self._clear_proof()
         self._update_given(assumptions)
 
