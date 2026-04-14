@@ -1,71 +1,110 @@
 from lark import Lark, Transformer, v_args
 
-from .ast import Atom, Not, And, Imp
+from .ast import Atom, Not, And, Imp, Predicate, ForAll, Exists
 
-GRAMMER = r""" #lark syntax, don't ask
-?start: formula #The parser should start by parsing a formula.
-?formula: implication #Every formula is an implication-level expression
+# Grammar covers propositional logic + first-order quantifiers.
+#
+# Precedence (low → high):
+#   quantifiers  <  implication  <  conjunction  <  negation  <  primary
+#
+# Terminals:
+#   NAME  — /[A-Z][A-Z0-9_]*/   propositional atoms and predicate/constant names
+#   VAR   — /[a-z][a-z0-9_]*/   first-order variables (bound by ∀/∃)
+#
+# Anonymous terminals ("forall", "exists", "->", "&", "~", "(", ")", ",", ".")
+# are filtered out of the transformer args by Lark automatically.
 
-?implication: conjunction #Defines implication expressions
-    | conjunction "->" implication -> imp  #Case: When this rule matches, call the transformer function imp()
+GRAMMAR = r"""
+?start: formula
+
+?formula: implication
+    | "forall" VAR "." formula  -> forall_op
+    | "exists" VAR "." formula  -> exists_op
+
+?implication: conjunction
+    | conjunction "->" implication  -> imp
 
 ?conjunction: unary
-    | conjunction "&" unary -> and_op #Case: When this rule matches, call the transformer function and_op()
+    | conjunction "&" unary  -> and_op
 
-?unary: atom  # case 1: atom
-    | "~" unary -> not_op # case 2: neg
-    | "(" formula ")" #case 3: parentheses
+?unary: primary
+    | "~" unary  -> not_op
 
-atom: /[A-Z][A-Z0-9_]*/
+?primary: "(" formula ")"
+    | NAME "(" arglist ")"  -> predicate
+    | NAME                  -> atom
+
+arglist: term ("," term)*
+
+?term: VAR   -> var_term
+     | NAME  -> const_term
+
+NAME: /[A-Z][A-Z0-9_]*/
+VAR:  /[a-z][a-z0-9_]*/
 
 %import common.WS
-%ignore WS #whitespace is allowed but irrelevant! :P
+%ignore WS
 """
 
+
 @v_args(inline=True)
-class FormmulaTransformer(Transformer):
+class FormulaTransformer(Transformer):
     """
-    Transforms parse trees produced by the Lark grammar into internal Abstract Syntax Tree (AST) objects representing propositional logic formulas.
+    Transforms a Lark parse tree into internal AST objects.
 
-    The parser first reads an input string (e.g. "(P & Q) -> R") and produces a parse tree according to the grammar rules.
-    This transformer walks that parse tree and converts each matched rule into the corresponding Formula object.
+    Propositional rules (unchanged from original):
+      atom        →  Atom(name)
+      not_op      →  Not(child)
+      and_op      →  And(left, right)
+      imp         →  Imp(left, right)
 
-    Each method corresponds to a grammar rule:
-        atom    = Atom(name)
-        not_op  = Not(child)
-        and_op  = And(left, right)
-        imp     = Imp(left, right)
-
-    e.g.,
-        Input string:
-            "(P & Q) -> R"
-
-        Parse tree:
-            imp
-             |─ and_op
-             │   |─ atom(P)
-             │   |─ atom(Q)
-             |─ atom(R)
-
-        Transformed AST:
-            Imp(
-                And(Atom("P"), Atom("Q")),
-                Atom("R")
-            )
-    The resulting AST objects are used by the theorem prover for proof search, rule application, and proof tree construction.
+    First-order rules (new):
+      predicate   →  Predicate(name, args)
+      forall_op   →  ForAll(var, body)
+      exists_op   →  Exists(var, body)
+      var_term    →  str  (variable name)
+      const_term  →  str  (constant name)
     """
-    
+
+    # ── propositional ─────────────────────────────────────────────────────
+
     def atom(self, token):
         return Atom(str(token))
+
     def not_op(self, child):
         return Not(child)
+
     def and_op(self, left, right):
         return And(left, right)
+
     def imp(self, left, right):
         return Imp(left, right)
-    
-_parser = Lark(GRAMMER, parser="lalr", transformer=FormmulaTransformer())
 
-def parse_formula(text: str):
+    # ── first-order ───────────────────────────────────────────────────────
+
+    def predicate(self, name, args):
+        # `args` is the list returned by arglist()
+        return Predicate(str(name), tuple(args))
+
+    def arglist(self, *terms):
+        # Anonymous "," separators are filtered by Lark; only term results remain.
+        return list(terms)
+
+    def var_term(self, token):
+        return str(token)
+
+    def const_term(self, token):
+        return str(token)
+
+    def forall_op(self, var, body):
+        return ForAll(str(var), body)
+
+    def exists_op(self, var, body):
+        return Exists(str(var), body)
+
+
+_parser = Lark(GRAMMAR, parser="lalr", transformer=FormulaTransformer())
+
+
+def parse_formula(text: str) -> "Formula":
     return _parser.parse(text)
-
