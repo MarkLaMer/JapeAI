@@ -21,9 +21,7 @@ import tkinter as tk
 from tkinter import ttk, font as tkfont
 
 from parser.parser import parse_formula
-from csp.skeleton_csp import solve_csp, CSPStep, CSPImpIntroStep
-from logic.rules import prove
-from logic.proof_tree import ProofNode
+from csp.fol_csp import solve_fol_csp, render_fol_csp_steps
 from planning.internal_planner import plan_forward
 
 
@@ -59,58 +57,25 @@ BTN_HYP_ACT = "#B8B8B8"
 # Example problems
 # ---------------------------------------------------------------------------
 EXAMPLES = [
-    ("P, P->Q  |-  Q",           ["P", "P -> Q"],             "Q"),
-    ("P&Q  |-  Q&P",             ["P & Q"],                   "Q & P"),
-    ("P, Q  |-  P & Q",          ["P", "Q"],                  "P & Q"),
-    ("|-  P -> P",               [],                          "P -> P"),
-    ("|-  (P&Q) -> (Q&P)",       [],                          "(P & Q) -> (Q & P)"),
-    ("|-  P -> (Q -> P)",        [],                          "P -> (Q -> P)"),
-    ("P,P->Q,Q->R  |-  R",       ["P", "P -> Q", "Q -> R"],   "R"),
-    ("P,P->Q,Q->R,R->S  |-  S",  ["P","P->Q","Q->R","R->S"],  "S"),
-    ("P  |-  Q -> (P & Q)",      ["P"],                       "Q -> (P & Q)"),
-    ("P  |-  Q  (unprovable)",   ["P"],                       "Q"),
+    # Propositional
+    ("P, P→Q  ⊢  Q",                  ["P", "P -> Q"],                              "Q"),
+    ("P∧Q  ⊢  Q∧P",                   ["P & Q"],                                    "Q & P"),
+    ("P, Q  ⊢  P ∧ Q",                ["P", "Q"],                                   "P & Q"),
+    ("⊢  P → P",                      [],                                            "P -> P"),
+    ("⊢  (P∧Q) → (Q∧P)",             [],                                            "(P & Q) -> (Q & P)"),
+    ("P  ⊢  Q → (P ∧ Q)",            ["P"],                                         "Q -> (P & Q)"),
+    # FOL
+    ("∀y.T(y)→Q(y), ∀y.T(y)  ⊢  ∀y.Q(y)",
+        ["∀y.(T(y)→Q(y))", "∀y.T(y)"],                                              "∀y.Q(y)"),
+    ("∀y.(T(y)→Q(y)∧R(y))  ⊢  ∀y.(T(y)→∃z.Q(z))",
+        ["∀y.(T(y)→(Q(y)∧R(y)))"],                                                  "∀y.(T(y)→∃z.Q(z))"),
+    ("∃y.T(y), ∀y.(T(y)→R(y))  ⊢  ∃y.R(y)",
+        ["∃y.T(y)", "∀y.(T(y)→R(y))"],                                              "∃y.R(y)"),
+    ("∀x.(P(x)→T(x))  ⊢  ∃x.P(x)→∃x.T(x)",
+        ["∀x.(P(x)→T(x))"],                                                          "∃x.P(x)→∃x.T(x)"),
+    ("∀y.∀z.(∃x.¬R(x)→(P(z)→¬Q(y)))  ⊢  ∀y.∀z.∀x.((P(z)∧Q(x))→R(z))",
+        ["∀y.∀z.(∃x.¬R(x)→(P(z)→¬Q(y)))"],                                         "∀y.∀z.∀x.((P(z)∧Q(x))→R(z))"),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Proof rendering helpers (unchanged logic, same output format)
-# ---------------------------------------------------------------------------
-
-def render_proof_node(node: ProofNode, lines: list, depth: int = 0) -> None:
-    for child in node.children:
-        render_proof_node(child, lines, depth)
-    rule_map = {
-        "Assumption": "assumption",
-        "AndIntro":   "& intro",
-        "ImpIntro":   "-> intro",
-        "MP":         "-> elim",
-        "Given":      "given",
-    }
-    rule_label = rule_map.get(node.rule, node.rule)
-    lines.append((depth, str(node.conclusion), rule_label, node.note))
-
-
-def render_csp_steps(steps, lines: list, depth: int = 0) -> None:
-    for step in steps:
-        if isinstance(step, CSPImpIntroStep):
-            lines.append((depth, f"assume {step.antecedent}", "hyp", None))
-            render_csp_steps(list(step.sub_steps), lines, depth + 1)
-            lines.append((depth, str(step.formula), "-> intro", None))
-        else:
-            parts = []
-            if step.support1:
-                parts.append(str(step.support1))
-            if step.support2:
-                parts.append(str(step.support2))
-            justification = ", ".join(parts) if parts else None
-            rule_map = {
-                "modus_ponens":   "-> elim",
-                "and_intro":      "& intro",
-                "and_elim_left":  "& elim L",
-                "and_elim_right": "& elim R",
-            }
-            rule_label = rule_map.get(step.rule, step.rule)
-            lines.append((depth, str(step.formula), rule_label, justification))
 
 
 def render_plan(plan: list[str], lines: list) -> None:
@@ -185,7 +150,7 @@ class JapeAIApp:
         self.root.configure(bg=BG_ROOT)
         self.root.minsize(640, 460)
 
-        self._solver_var = tk.StringVar(value="logic")
+        self._solver_var = tk.StringVar(value="csp")
         self._status_var = tk.StringVar(value="Enter a problem and press Prove.")
 
         self._build_menu()
@@ -219,8 +184,7 @@ class JapeAIApp:
 
         solver_menu = tk.Menu(proof_menu, tearoff=False)
         for label, value in [
-            ("Logic prover  (backward)",   "logic"),
-            ("CSP  (forward + ImpIntro)",  "csp"),
+            ("CSP  (forward + FOL)",       "csp"),
             ("PDDL planner  (forward BFS)","pddl"),
         ]:
             solver_menu.add_radiobutton(
@@ -245,6 +209,49 @@ class JapeAIApp:
     # Toolbar  (assumptions | goal | Prove | Clear | status)
     # -----------------------------------------------------------------------
 
+    # Keyboard substitution map: type these ASCII sequences → get Unicode symbols
+    _SUBSTITUTIONS = [
+        ("forall", "∀"), ("exists", "∃"),
+        ("<->",    "↔"), ("->",    "→"),
+        ("\\/",    "∨"), ("/\\",   "∧"),
+        ("~",      "¬"), ("|-",    "⊢"),
+    ]
+
+    def _wire_substitutions(self, entry: tk.Entry) -> None:
+        """Attach keyboard-substitution bindings to an Entry widget."""
+        def _on_key(event, widget=entry):
+            # After any key, scan for substitution sequences
+            widget.after_idle(lambda: self._apply_substitutions(widget))
+        entry.bind("<KeyRelease>", _on_key)
+
+    def _apply_substitutions(self, entry: tk.Entry) -> None:
+        text = entry.get()
+        cursor = entry.index(tk.INSERT)
+        changed = False
+        for seq, sym in self._SUBSTITUTIONS:
+            idx = text.find(seq)
+            while idx != -1:
+                text = text[:idx] + sym + text[idx + len(seq):]
+                # Adjust cursor position
+                if cursor > idx:
+                    cursor = max(idx + len(sym),
+                                 cursor - len(seq) + len(sym))
+                changed = True
+                idx = text.find(seq, idx + len(sym))
+        if changed:
+            entry.delete(0, tk.END)
+            entry.insert(0, text)
+            entry.icursor(min(cursor, len(text)))
+
+    def _insert_symbol(self, symbol: str) -> None:
+        """Insert *symbol* at the cursor position of the focused entry."""
+        widget = self.root.focus_get()
+        if isinstance(widget, tk.Entry):
+            try:
+                widget.insert(tk.INSERT, symbol)
+            except tk.TclError:
+                pass
+
     def _build_toolbar(self) -> None:
         tb = tk.Frame(self.root, bg=BG_TOOLBAR, bd=0)
         tb.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
@@ -252,8 +259,9 @@ class JapeAIApp:
         # Thin separator line at bottom of toolbar
         tk.Frame(tb, bg=C_SEP, height=1).pack(side=tk.BOTTOM, fill=tk.X)
 
+        # ── Row 1: entry fields, solver radios, Prove/Clear, status ────────
         inner = tk.Frame(tb, bg=BG_TOOLBAR)
-        inner.pack(fill=tk.X, padx=8, pady=6)
+        inner.pack(fill=tk.X, padx=8, pady=(6, 2))
 
         # Assumptions
         tk.Label(inner, text="Assumptions:", font=FONT_TOOLBAR,
@@ -264,6 +272,7 @@ class JapeAIApp:
         )
         self._assumptions_entry.pack(side=tk.LEFT, padx=(4, 12))
         self._assumptions_entry.bind("<Return>", lambda _: self._on_prove())
+        self._wire_substitutions(self._assumptions_entry)
 
         # Goal
         tk.Label(inner, text="Goal:", font=FONT_TOOLBAR,
@@ -274,11 +283,12 @@ class JapeAIApp:
         )
         self._goal_entry.pack(side=tk.LEFT, padx=(4, 12))
         self._goal_entry.bind("<Return>", lambda _: self._on_prove())
+        self._wire_substitutions(self._goal_entry)
 
         # Solver radio buttons
         solver_frame = tk.Frame(inner, bg=BG_TOOLBAR)
         solver_frame.pack(side=tk.LEFT, padx=(0, 12))
-        for label, value in [("Logic", "logic"), ("CSP", "csp"), ("PDDL", "pddl")]:
+        for label, value in [("CSP", "csp"), ("PDDL", "pddl")]:
             tk.Radiobutton(
                 solver_frame, text=label, variable=self._solver_var,
                 value=value, font=FONT_TOOLBAR, bg=BG_TOOLBAR,
@@ -308,6 +318,35 @@ class JapeAIApp:
             anchor="e",
         )
         self._status_label.pack(side=tk.RIGHT, padx=(8, 0))
+
+        # ── Row 2: symbol palette ───────────────────────────────────────────
+        palette_row = tk.Frame(tb, bg=BG_TOOLBAR)
+        palette_row.pack(fill=tk.X, padx=8, pady=(0, 5))
+
+        tk.Label(palette_row, text="Insert:", font=FONT_TOOLBAR,
+                 bg=BG_TOOLBAR, fg=C_STEPNUM).pack(side=tk.LEFT, padx=(0, 4))
+
+        SYMBOLS = [
+            ("∀  forall", "∀"),
+            ("∃  exists", "∃"),
+            ("¬  ~",      "¬"),
+            ("∧  /\\",    "∧"),
+            ("∨  \\/",    "∨"),
+            ("→  ->",     "→"),
+            ("↔  <->",    "↔"),
+            ("⊢  |-",     "⊢"),
+        ]
+        for display, sym in SYMBOLS:
+            tk.Button(
+                palette_row, text=display,
+                font=("Segoe UI", 10),
+                bg=BTN_HYP_BG, fg=C_TEXT,
+                activebackground=BTN_HYP_ACT,
+                relief=tk.RAISED, bd=1,
+                padx=6, pady=1,
+                cursor="hand2",
+                command=lambda s=sym: self._insert_symbol(s),
+            ).pack(side=tk.LEFT, padx=2)
 
     # -----------------------------------------------------------------------
     # Main area  (proof pane + given pane, PanedWindow)
@@ -380,25 +419,14 @@ class JapeAIApp:
 
         t0 = time.perf_counter()
 
-        if solver == "logic":
-            result = prove(goal, set(assumptions))
+        if solver == "csp":
+            result = solve_fol_csp(assumptions, goal)
             elapsed = time.perf_counter() - t0
             if result is None:
                 self.root.after(0, lambda: self._show_no_proof(elapsed))
             else:
                 lines: list = []
-                render_proof_node(result, lines)
-                self.root.after(0, lambda: self._display_proof(
-                    lines, assumptions, goal, elapsed, "logic"))
-
-        elif solver == "csp":
-            result = solve_csp(assumptions, goal)
-            elapsed = time.perf_counter() - t0
-            if result is None:
-                self.root.after(0, lambda: self._show_no_proof(elapsed))
-            else:
-                lines = []
-                render_csp_steps(result, lines)
+                render_fol_csp_steps(result, lines)
                 self.root.after(0, lambda: self._display_proof(
                     lines, assumptions, goal, elapsed, "csp"))
 
@@ -450,7 +478,10 @@ class JapeAIApp:
         container = self._proof_scroll.inner
         INDENT    = "  |  "   # per depth level, shown as a scope bar label
 
-        solver_label = {"logic": "Logic prover", "csp": "CSP", "pddl": "PDDL planner"}[solver]
+        solver_label = {
+            "csp":  "CSP",
+            "pddl": "PDDL planner",
+        }.get(solver, solver)
 
         for i, entry in enumerate(lines, start=1):
             depth, formula, rule, note = (entry + (None,))[:4] if len(entry) == 3 else entry

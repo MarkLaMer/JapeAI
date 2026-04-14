@@ -1,71 +1,102 @@
 from lark import Lark, Transformer, v_args
 
-from .ast import Atom, Not, And, Imp
+from .ast import Atom, Not, And, Imp, Or, Var, Predicate, ForAll, Exists
 
-GRAMMER = r""" #lark syntax, don't ask
-?start: formula #The parser should start by parsing a formula.
-?formula: implication #Every formula is an implication-level expression
+# ---------------------------------------------------------------------------
+# Grammar
+#
+# Operator precedence (tightest → loosest):
+#   atoms / predicates
+#   negation        ~   ¬
+#   quantifiers     ∀   ∃  (at unary level — bind smallest scope without parens)
+#   conjunction     &   ∧
+#   disjunction     |   ∨
+#   implication     ->  →  (right-associative)
+#
+# Putting quantifiers at the unary level means:
+#   ∃y.Q(y) ∨ ∃z.S(z)  parses as  (∃y.Q(y)) ∨ (∃z.S(z))   CHECK!
+#   ∀y.(T(y)→Q(y))      parens give implication scope     CHECK!
+#   ∀y.∀z.(body)         nested quantifiers work fine     CHECK!
+# ---------------------------------------------------------------------------
+GRAMMAR = r"""
+?start: formula
 
-?implication: conjunction #Defines implication expressions
-    | conjunction "->" implication -> imp  #Case: When this rule matches, call the transformer function imp()
+?formula: implication
+    | implication "->"  formula  -> imp
+    | implication "\u2192" formula -> imp
+
+?implication: disjunction
+
+?disjunction: conjunction
+    | disjunction "|"        conjunction -> or_op
+    | disjunction "\u2228"   conjunction -> or_op
 
 ?conjunction: unary
-    | conjunction "&" unary -> and_op #Case: When this rule matches, call the transformer function and_op()
+    | conjunction "&"        unary -> and_op
+    | conjunction "\u2227"   unary -> and_op
 
-?unary: atom  # case 1: atom
-    | "~" unary -> not_op # case 2: neg
-    | "(" formula ")" #case 3: parentheses
+?unary: primary
+    | "~"         unary -> not_op
+    | "\u00AC"    unary -> not_op
+    | "\u2200" VAR "." unary -> forall
+    | "forall"    VAR "." unary -> forall
+    | "\u2203" VAR "." unary -> exists
+    | "exists"    VAR "." unary -> exists
 
-atom: /[A-Z][A-Z0-9_]*/
+?primary: predicate
+    | propvar
+    | "(" formula ")"
+
+predicate : UNAME "(" varlist ")"
+propvar   : UNAME
+varlist   : VAR ("," VAR)*
+
+UNAME : /[A-Z][A-Z0-9_]*/
+VAR   : /[a-z][a-z0-9_]*/
 
 %import common.WS
-%ignore WS #whitespace is allowed but irrelevant! :P
+%ignore WS
 """
 
+
 @v_args(inline=True)
-class FormmulaTransformer(Transformer):
-    """
-    Transforms parse trees produced by the Lark grammar into internal Abstract Syntax Tree (AST) objects representing propositional logic formulas.
+class _Transformer(Transformer):
 
-    The parser first reads an input string (e.g. "(P & Q) -> R") and produces a parse tree according to the grammar rules.
-    This transformer walks that parse tree and converts each matched rule into the corresponding Formula object.
-
-    Each method corresponds to a grammar rule:
-        atom    = Atom(name)
-        not_op  = Not(child)
-        and_op  = And(left, right)
-        imp     = Imp(left, right)
-
-    e.g.,
-        Input string:
-            "(P & Q) -> R"
-
-        Parse tree:
-            imp
-             |─ and_op
-             │   |─ atom(P)
-             │   |─ atom(Q)
-             |─ atom(R)
-
-        Transformed AST:
-            Imp(
-                And(Atom("P"), Atom("Q")),
-                Atom("R")
-            )
-    The resulting AST objects are used by the theorem prover for proof search, rule application, and proof tree construction.
-    """
-    
-    def atom(self, token):
-        return Atom(str(token))
+    # ── Propositional connectives ────────────────────────────────────────────
     def not_op(self, child):
         return Not(child)
+
     def and_op(self, left, right):
         return And(left, right)
+
+    def or_op(self, left, right):
+        return Or(left, right)
+
     def imp(self, left, right):
         return Imp(left, right)
-    
-_parser = Lark(GRAMMER, parser="lalr", transformer=FormmulaTransformer())
+
+    # ── FOL quantifiers ──────────────────────────────────────────────────────
+    def forall(self, var_token, body):
+        return ForAll(str(var_token), body)
+
+    def exists(self, var_token, body):
+        return Exists(str(var_token), body)
+
+    # ── Atoms / predicates ───────────────────────────────────────────────────
+    def propvar(self, token):
+        return Atom(str(token))
+
+    def predicate(self, name_token, varlist):
+        return Predicate(str(name_token), tuple(varlist))
+
+    # varlist is NOT inline — receives a list of VAR tokens
+    @v_args(inline=False)
+    def varlist(self, tokens):
+        return [Var(str(t)) for t in tokens]
+
+
+_parser = Lark(GRAMMAR, parser="lalr", transformer=_Transformer())
+
 
 def parse_formula(text: str):
     return _parser.parse(text)
-
