@@ -458,6 +458,64 @@ def _fol_solve(
     return None
 
 
+def _saturate_contra(
+    available: set[Formula],
+    keys: _Keys,
+) -> tuple[set[Formula], list[FOLProofStep], _Keys]:
+    """
+    Eagerly apply ∧-elim, MP, and ∃-intro-for-antecedents to fixed point,
+    recording each step.  Returns (expanded, steps, updated_keys).
+
+    This avoids one recursive call per step — ∧-elim and MP are
+    deterministic and always worth doing, so doing them iteratively here
+    keeps struct_depth from growing unnecessarily.
+    """
+    expanded = set(available)
+    steps: list[FOLProofStep] = []
+    new_keys = keys
+    changed = True
+    while changed:
+        changed = False
+        for f in list(expanded):
+            if isinstance(f, And):
+                for part, rule in [(f.left, "and_elim_l"), (f.right, "and_elim_r")]:
+                    k = ("sat_" + rule, str(f))
+                    if part not in expanded and k not in new_keys:
+                        expanded.add(part)
+                        steps.append(FOLStep(formula=part, rule=rule, support1=f))
+                        new_keys = new_keys | {k}
+                        changed = True
+            elif isinstance(f, Imp):
+                k = ("sat_mp", str(f))
+                if f.left in expanded and f.right not in expanded and k not in new_keys:
+                    expanded.add(f.right)
+                    steps.append(FOLStep(formula=f.right, rule="mp",
+                                         support1=f.left, support2=f))
+                    new_keys = new_keys | {k}
+                    changed = True
+        # ∃-intro for implication antecedents (∃x.B → C + witness B[t])
+        terms_now = collect_terms(expanded)
+        for f in list(expanded):
+            if not isinstance(f, Imp) or not isinstance(f.left, Exists):
+                continue
+            ex = f.left
+            if ex in expanded:
+                continue
+            k = ("sat_∃I", str(ex))
+            if k in new_keys:
+                continue
+            for term in terms_now:
+                witness = subst(ex.body, ex.var, term)
+                if witness in expanded:
+                    expanded.add(ex)
+                    steps.append(FOLStep(formula=ex, rule="exists_intro",
+                                         support1=witness, note=f"{ex.var}↦{term}"))
+                    new_keys = new_keys | {k}
+                    changed = True
+                    break
+    return expanded, steps, new_keys
+
+
 def _fol_solve_contra(
     base:        list[Formula],
     max_steps:   int,
@@ -466,27 +524,49 @@ def _fol_solve_contra(
     domain:      set[Formula],
 ) -> Optional[list[FOLProofStep]]:
     """
-    Try to derive a contradiction (⊥) from *base*.
-    Uses aggressive forward expansion + tries to prove the positive
-    form of each negation in context.
+    Try to derive a contradiction (⊥) from *base*, returning explicit
+    proof steps for every intermediate derivation.
+
+    Phase 1: eager saturation (∧-elim, MP, ∃-intro-for-antecedents) in
+             one iterative pass — fast, no depth cost, fully tracked.
+    Phase 2: recursive branching for ∃-elim, ∀-elim, ∨-elim, prove-positive.
     """
     if struct_depth > MAX_STRUCT_DEPTH:
         return None
 
-    # Aggressive expansion: ∧-elim + MP + ∃-witness implications
-    from logic.fol_prover import _expand_with_witnesses
-    available = _expand_with_witnesses(set(base))
+    # ── Phase 1: saturate eagerly ───────────────────────────────────────────
+    available, early_steps, keys = _saturate_contra(set(base), keys)
 
-    # Direct contradiction
     contra = _contradiction(available)
     if contra:
         pos, neg = contra
-        return [FOLStep(formula=Atom("⊥"), rule="contradiction",
-                        support1=pos, support2=neg)]
+        return early_steps + [FOLStep(formula=Atom("⊥"), rule="contradiction",
+                                      support1=pos, support2=neg)]
 
     terms = collect_terms(available)
 
-    # ∀-elim into context
+    # ── Phase 2: branching rules ────────────────────────────────────────────
+
+    # ∃-elim: open a named scope (creates fresh constant → new terms for ∀-elim)
+    for f in list(available):
+        if not isinstance(f, Exists):
+            continue
+        key = ("∃E⊥", str(f))
+        if key in keys:
+            continue
+        c = _fresh()
+        instance = subst(f.body, f.var, c)
+        result = _fol_solve_contra(
+            list(available) + [instance],
+            max_steps, struct_depth + 1, keys | {key}, domain,
+        )
+        if result is not None:
+            return early_steps + [FOLExistsElimStep(
+                formula=Atom("⊥"), elim_formula=f, const_name=c.name,
+                sub_steps=tuple(result),
+            )]
+
+    # ∀-elim: instantiate each universal with available terms
     for f in list(available):
         if not isinstance(f, ForAll):
             continue
@@ -502,25 +582,11 @@ def _fol_solve_contra(
                 max_steps, struct_depth + 1, keys | {key}, domain,
             )
             if result is not None:
-                return result
+                forall_step = FOLStep(formula=instance, rule="forall_elim",
+                                      support1=f, note=f"{f.var}↦{term}")
+                return early_steps + [forall_step] + result
 
-    # ∃-elim into context
-    for f in list(available):
-        if not isinstance(f, Exists):
-            continue
-        key = ("∃E⊥", str(f))
-        if key in keys:
-            continue
-        c = _fresh()
-        instance = subst(f.body, f.var, c)
-        result = _fol_solve_contra(
-            list(available) + [instance],
-            max_steps, struct_depth + 1, keys | {key}, domain,
-        )
-        if result is not None:
-            return result
-
-    # ∨-elim into context
+    # ∨-elim: case split (both branches must reach ⊥)
     for f in list(available):
         if not isinstance(f, Or):
             continue
@@ -534,7 +600,10 @@ def _fol_solve_contra(
             r = _fol_solve_contra(list(available) + [f.right],
                                    max_steps, struct_depth + 1, new_keys, domain)
             if r is not None:
-                return l + r   # both branches reach ⊥
+                return early_steps + [FOLOrElimStep(
+                    formula=Atom("⊥"), or_formula=f,
+                    left_steps=tuple(l), right_steps=tuple(r),
+                )]
 
     # Prove the positive form of each negation present
     for f in list(available):
@@ -548,8 +617,10 @@ def _fol_solve_contra(
             max_steps, struct_depth + 1, keys | {key}, domain,
         )
         if proof is not None:
-            return proof + [FOLStep(formula=Atom("⊥"), rule="contradiction",
-                                    support1=f.child, support2=f)]
+            return early_steps + proof + [FOLStep(
+                formula=Atom("⊥"), rule="contradiction",
+                support1=f.child, support2=f,
+            )]
 
     return None
 
@@ -620,7 +691,7 @@ def render_fol_csp_steps(
         "and_elim_l":   "∧ elim L",
         "and_elim_r":   "∧ elim R",
         "ex_falso":     "ex falso",
-        "contradiction":"⊥",
+        "contradiction":"¬ elim",
         "forall_intro": "∀ intro",
         "imp_intro":    "→ intro",
         "exists_elim":  "∃ elim",
@@ -632,14 +703,13 @@ def render_fol_csp_steps(
     for step in steps:
 
         if isinstance(step, FOLForAllIntroStep):
-            lines.append((depth, f"[ ∀-introduce  {step.var} ↦ {step.const_name} ]",
-                          "premise", None))
+            lines.append((depth, f"actual {step.const_name}", "assumption", None))
             render_fol_csp_steps(list(step.sub_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "∀ intro",
                           f"{step.var}↦{step.const_name}"))
 
         elif isinstance(step, FOLImpIntroStep):
-            lines.append((depth, f"[ assume  {step.antecedent} ]", "hyp", None))
+            lines.append((depth, str(step.antecedent), "assumption", None))
             render_fol_csp_steps(list(step.sub_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "→ intro", None))
 
@@ -657,19 +727,19 @@ def render_fol_csp_steps(
 
         elif isinstance(step, FOLOrElimStep):
             lines.append((depth, f"[ ∨-cases  {step.or_formula} ]", "premise", None))
-            lines.append((depth + 1, f"[ case  {step.or_formula.left} ]", "hyp", None))
+            lines.append((depth + 1, str(step.or_formula.left), "assumption", None))
             render_fol_csp_steps(list(step.left_steps), lines, depth + 2)
-            lines.append((depth + 1, f"[ case  {step.or_formula.right} ]", "hyp", None))
+            lines.append((depth + 1, str(step.or_formula.right), "assumption", None))
             render_fol_csp_steps(list(step.right_steps), lines, depth + 2)
             lines.append((depth, str(step.formula), "∨ elim", None))
 
         elif isinstance(step, FOLNotIntroStep):
-            lines.append((depth, f"[ assume  {step.assumed} ]", "hyp", None))
+            lines.append((depth, str(step.assumed), "assumption", None))
             render_fol_csp_steps(list(step.contra_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "¬ intro", None))
 
         elif isinstance(step, FOLRAAStep):
-            lines.append((depth, f"[ assume  {step.neg_assumed} ]", "hyp", None))
+            lines.append((depth, str(step.neg_assumed), "assumption", None))
             render_fol_csp_steps(list(step.contra_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "RAA", None))
 
