@@ -476,8 +476,12 @@ class JapeAIApp:
         parts = [self._last_sequent, ""]
         for depth, formula, rule, note in self._last_proof_lines:
             pad = INDENT * depth
-            if rule in ("hyp", "premise"):
+            if rule == "hyp":
                 parts.append(f"{pad}{formula}")
+            elif rule in ("premise",):
+                parts.append(f"{pad}{formula}")
+            elif rule in ("premises", "assumptions"):
+                parts.append(f"{pad}{formula}   {rule}")
             else:
                 n = f"  [{note}]" if note else ""
                 parts.append(f"{pad}{formula}   ({rule}){n}")
@@ -499,6 +503,11 @@ class JapeAIApp:
     def _display_proof(
         self, lines: list, assumptions, goal, elapsed: float, solver: str,
     ) -> None:
+        # Prepend a "premises" line listing the assumptions (like Jape line 1)
+        if assumptions:
+            premises_str = ", ".join(str(a) for a in assumptions)
+            lines = [(0, premises_str, "premises", None)] + lines
+
         self._last_proof_lines = lines
         self._last_sequent = (
             (", ".join(str(a) for a in assumptions) + "  ⊢  " if assumptions else "⊢  ")

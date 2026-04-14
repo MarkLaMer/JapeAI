@@ -575,8 +575,8 @@ def solve_fol_csp(
     domain = _build_domain(assumptions, goal)
 
     # Pass 1: direct proofs only
-    reset_fresh()
     for max_steps in range(max_bound + 1):
+        reset_fresh()
         result = _fol_solve(
             list(assumptions), goal,
             max_steps, 0, frozenset(), domain, allow_raa=False,
@@ -585,8 +585,8 @@ def solve_fol_csp(
             return result
 
     # Pass 2: allow classical RAA
-    reset_fresh()
     for max_steps in range(max_bound + 1):
+        reset_fresh()
         result = _fol_solve(
             list(assumptions), goal,
             max_steps, 0, frozenset(), domain, allow_raa=True,
@@ -644,9 +644,13 @@ def render_fol_csp_steps(
             lines.append((depth, str(step.formula), "→ intro", None))
 
         elif isinstance(step, FOLExistsElimStep):
+            from logic.fol_prover import subst
+            from parser.ast import Var as _Var
+            inst = subst(step.elim_formula.body, step.elim_formula.var,
+                         _Var(step.const_name))
             lines.append((depth,
-                          f"[ ∃-eliminate  {step.elim_formula}  ↦  {step.const_name} ]",
-                          "premise", None))
+                          f"[ actual {step.const_name}, {inst} ]",
+                          "assumptions", None))
             render_fol_csp_steps(list(step.sub_steps), lines, depth + 1)
             lines.append((depth, str(step.formula), "∃ elim",
                           f"{step.const_name}"))
