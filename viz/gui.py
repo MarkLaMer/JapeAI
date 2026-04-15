@@ -23,6 +23,7 @@ from tkinter import ttk, font as tkfont
 from parser.parser import parse_formula
 from csp.fol_csp import solve_fol_csp, render_fol_csp_steps
 from planning.internal_planner import plan_forward
+from cbn.logic_causal import solve_logic_causal, render_logic_causal_steps
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,8 @@ C_BTN_2_BG      = "#F3F4F6"
 C_BTN_2_FG      = "#374151"
 C_BTN_2_ACT     = "#E5E7EB"
 C_BTN_DIS_FG    = "#9CA3AF"
+
+C_CAUSAL_BADGE  = "#0369A1"   # sky-blue accent for the "Causal" solver label
 
 FONT_FORMULA  = ("Palatino Linotype", 14)
 FONT_FORMULA_B= ("Palatino Linotype", 14, "bold")
@@ -116,12 +119,27 @@ EXAMPLES = [
         ["∃y.(Q(y)→T(y))∧∀y.((T(y)∧Q(y))∨Q(y))"],                        "∃y.(T(y)∧Q(y))"),
     ("∀y.¬(T(y)∨∃z.P(z))  ⊢  ¬∃y.(¬∃z.P(z)→T(y))",
         ["∀y.¬(T(y)∨∃z.P(z))"],                                           "¬∃y.(¬∃z.P(z)→T(y))"),
+    # ── Causal / CBN (same Assumptions+Goal format as other solvers) ──────────
+    None,
+    ("Causal CBN",),
+    ("P, P→Q, Q→R  ⊢  R  [CBN chain]",
+        ["P", "P→Q", "Q→R"],                      "R"),
+    ("P, P→Q, Q→R, R→S  ⊢  S  [long chain]",
+        ["P", "P→Q", "Q→R", "R→S"],               "S"),
+    ("P∧Q, (P∧Q)→R  ⊢  R  [and-elim + MP]",
+        ["P & Q", "(P & Q)→R"],                    "R"),
+    ("P, Q  ⊢  P∧Q  [and-intro]",
+        ["P", "Q"],                                "P & Q"),
+    ("P∧Q  ⊢  P  [and-elim]",
+        ["P & Q"],                                 "P"),
 ]
 
 
 def render_plan(plan: list[str], lines: list) -> None:
     for action in plan:
         lines.append((0, action, "action", None))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +222,7 @@ class JapeAIApp:
         self._status_var = tk.StringVar(value="Enter a problem and press Prove.")
         self._last_proof_lines: list = []   # (depth, formula, rule, note) tuples
         self._last_sequent: str = ""
+        self._causal_mode: bool = False     # True when "causal" solver is active
 
         self._build_menu()
         self._build_toolbar()
@@ -239,11 +258,13 @@ class JapeAIApp:
 
         solver_menu = tk.Menu(proof_menu, tearoff=False)
         for label, value in [
-            ("CSP  (forward + FOL)",       "csp"),
-            ("PDDL planner  (forward BFS)","pddl"),
+            ("CSP  (forward + FOL)",        "csp"),
+            ("PDDL planner  (forward BFS)", "pddl"),
+            ("Causal  (CBN / SCM)",         "causal"),
         ]:
             solver_menu.add_radiobutton(
                 label=label, variable=self._solver_var, value=value,
+                command=self._on_solver_change,
             )
         proof_menu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Proof", menu=proof_menu)
@@ -327,9 +348,9 @@ class JapeAIApp:
         row1.columnconfigure(1, weight=3, minsize=120)  # assumptions expands
         row1.columnconfigure(4, weight=1, minsize=80)   # goal expands less
 
-        tk.Label(row1, text="Assumptions:", font=FONT_TOOLBAR,
-                 bg=BG_TOOLBAR, fg=C_STEPNUM).grid(row=0, column=0, sticky="w",
-                                                   padx=(0, 4))
+        self._lbl_assumptions = tk.Label(row1, text="Assumptions:", font=FONT_TOOLBAR,
+                 bg=BG_TOOLBAR, fg=C_STEPNUM)
+        self._lbl_assumptions.grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._assumptions_entry = tk.Entry(
             row1, font=FONT_MONO,
             relief=tk.SOLID, bd=1,
@@ -343,9 +364,9 @@ class JapeAIApp:
         tk.Label(row1, text="⊢", font=("Palatino Linotype", 15),
                  bg=BG_TOOLBAR, fg=C_SCOPE).grid(row=0, column=2, padx=4)
 
-        tk.Label(row1, text="Goal:", font=FONT_TOOLBAR,
-                 bg=BG_TOOLBAR, fg=C_STEPNUM).grid(row=0, column=3, sticky="w",
-                                                   padx=(0, 4))
+        self._lbl_goal = tk.Label(row1, text="Goal:", font=FONT_TOOLBAR,
+                 bg=BG_TOOLBAR, fg=C_STEPNUM)
+        self._lbl_goal.grid(row=0, column=3, sticky="w", padx=(0, 4))
         self._goal_entry = tk.Entry(
             row1, font=FONT_MONO,
             relief=tk.SOLID, bd=1,
@@ -392,12 +413,13 @@ class JapeAIApp:
 
         solver_frame = tk.Frame(row2, bg=BG_TOOLBAR)
         solver_frame.pack(side=tk.LEFT)
-        for label, value in [("CSP", "csp"), ("PDDL", "pddl")]:
+        for label, value in [("CSP", "csp"), ("PDDL", "pddl"), ("Causal", "causal")]:
             tk.Radiobutton(
                 solver_frame, text=label, variable=self._solver_var,
                 value=value, font=FONT_TOOLBAR, bg=BG_TOOLBAR,
                 fg=C_TEXT, selectcolor=BG_TOOLBAR,
                 activebackground=BG_TOOLBAR,
+                command=self._on_solver_change,
             ).pack(side=tk.LEFT, padx=4)
 
         self._status_label = tk.Label(
@@ -477,6 +499,15 @@ class JapeAIApp:
     # Event handlers
     # -----------------------------------------------------------------------
 
+    def _on_solver_change(self) -> None:
+        """Update button label when switching solvers (field labels stay the same)."""
+        solver = self._solver_var.get()
+        self._causal_mode = (solver == "causal")
+        # All three solvers share the same Assumptions / Goal field labels.
+        self._lbl_assumptions.configure(text="Assumptions:")
+        self._lbl_goal.configure(text="Goal:")
+        self._prove_btn.configure(text="Prove")
+
     def _on_prove(self) -> None:
         self._prove_btn.configure(state=tk.DISABLED, text="Proving…")
         self._set_status("Working…", color=C_STEPNUM)
@@ -487,6 +518,31 @@ class JapeAIApp:
         raw_assumptions = self._assumptions_entry.get().strip()
         raw_goal        = self._goal_entry.get().strip()
         solver          = self._solver_var.get()
+
+        # --- Causal solver path (same parse as CSP / PDDL) ---
+        if solver == "causal":
+            try:
+                assumption_strs_c = [s.strip() for s in raw_assumptions.split(",") if s.strip()]
+                assumptions_c     = [parse_formula(s) for s in assumption_strs_c]
+                goal_c            = parse_formula(raw_goal)
+            except Exception as exc:
+                self.root.after(0, lambda: self._show_error(f"Parse error: {exc}"))
+                self.root.after(0, lambda: self._prove_btn.configure(
+                    state=tk.NORMAL, text="Prove"))
+                return
+            t0 = time.perf_counter()
+            result_c = solve_logic_causal(assumptions_c, goal_c)
+            elapsed_c = time.perf_counter() - t0
+            if result_c is None:
+                self.root.after(0, lambda: self._show_no_proof(elapsed_c))
+            else:
+                lines_c: list = []
+                render_logic_causal_steps(result_c, lines_c)
+                self.root.after(0, lambda: self._display_proof(
+                    lines_c, assumptions_c, goal_c, elapsed_c, "causal"))
+            self.root.after(0, lambda: self._prove_btn.configure(
+                state=tk.NORMAL, text="Prove"))
+            return
 
         try:
             assumption_strs = [s.strip() for s in raw_assumptions.split(",") if s.strip()]
@@ -533,7 +589,10 @@ class JapeAIApp:
         self._copy_btn.configure(state=tk.DISABLED)
         self._set_status("Enter a problem and press Prove.")
         self.root.title("JapeAI")
-        self._proof_header.configure(text="Proof")
+        solver = self._solver_var.get()
+        self._proof_header.configure(
+            text="Causal Reasoning Trace" if solver == "causal" else "Proof"
+        )
 
     def _on_copy(self) -> None:
         if not self._last_proof_lines:
@@ -592,8 +651,9 @@ class JapeAIApp:
         INDENT    = "  |  "   # per depth level, shown as a scope bar label
 
         solver_label = {
-            "csp":  "CSP",
-            "pddl": "PDDL planner",
+            "csp":    "CSP",
+            "pddl":   "PDDL planner",
+            "causal": "Causal (CBN/SCM)",
         }.get(solver, solver)
 
         for i, entry in enumerate(lines, start=1):

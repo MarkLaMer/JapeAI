@@ -17,6 +17,7 @@ from planning.internal_planner import plan_and_print
 from csp.skeleton_csp import solve_csp, print_csp_proof
 from logic.rules import prove
 from logic.proof_tree import print_proof
+from cbn.logic_causal import solve_logic_causal
 
 
 # --------------------------------------------------------------------------- #
@@ -156,9 +157,98 @@ def run_demos() -> None:
 # Entry point
 # --------------------------------------------------------------------------- #
 
+def solve_causal_problem(
+    assumption_strings: list[str],
+    goal_string: str,
+) -> None:
+    """
+    Solve a natural-deduction problem with the CBN/SCM causal solver and print steps.
+    Takes the same format as solve_problem() — list of formula strings + goal string.
+    """
+    try:
+        assumptions = [parse_formula(s.strip()) for s in assumption_strings]
+        goal = parse_formula(goal_string.strip())
+    except Exception as e:
+        print(f"Parse error: {e}")
+        return
+
+    print()
+    print("=" * 60)
+    print("Assumptions :", [str(a) for a in assumptions])
+    print("Goal        :", goal)
+    print("=" * 60)
+
+    print("\n[Causal (CBN/SCM) solver]")
+    result = solve_logic_causal(assumptions, goal)
+    if result is None:
+        print("  No proof found.")
+    else:
+        print(f"  Proof ({len(result)} step(s)):")
+        for i, action in enumerate(result, 1):
+            print(f"    {i}. {action}")
+
+
+def run_causal_demos() -> None:
+    """Run built-in causal (CBN/SCM) demos — same problems as main demos."""
+    problems = [
+        ("MP chain: P, P→Q, Q→R ⊢ R",
+         ["P", "P -> Q", "Q -> R"], "R"),
+
+        ("Long chain: P, P→Q, Q→R, R→S ⊢ S",
+         ["P", "P -> Q", "Q -> R", "R -> S"], "S"),
+
+        ("AND-ELIM + MP: (P & Q), (P & Q) → R ⊢ R",
+         ["P & Q", "(P & Q) -> R"], "R"),
+
+        ("AND intro: P, Q ⊢ P & Q",
+         ["P", "Q"], "P & Q"),
+
+        ("AND elim: P & Q ⊢ P",
+         ["P & Q"], "P"),
+
+        ("Unprovable: P ⊢ Q  [should fail]",
+         ["P"], "Q"),
+    ]
+
+    for label, assumptions, goal in problems:
+        print(f"\n{'#' * 60}")
+        print(f"# {label}")
+        solve_causal_problem(assumptions, goal)
+
+
+def interactive_causal() -> None:
+    """Interactive causal (CBN/SCM) proof mode — same UX as interactive()."""
+    print("JapeAI — Causal (CBN/SCM) proof assistant")
+    print("Syntax: atoms are uppercase (P, Q, R, …),  &  = conjunction,  ->  = implication")
+    print("Type 'exit' to quit.\n")
+
+    while True:
+        try:
+            raw = input("Assumptions (comma-separated, or blank): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nBye.")
+            break
+        if raw.lower() in ("exit", "quit"):
+            break
+        assumption_strings = [s for s in raw.split(",") if s.strip()] if raw else []
+        try:
+            goal_string = input("Goal: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nBye.")
+            break
+        if goal_string.lower() in ("exit", "quit"):
+            break
+        solve_causal_problem(assumption_strings, goal_string)
+        print()
+
+
 if __name__ == "__main__":
     if "--demo" in sys.argv:
         run_demos()
+    elif "--causal-demo" in sys.argv:
+        run_causal_demos()
+    elif "--causal" in sys.argv:
+        interactive_causal()
     elif "--pddl" in sys.argv:
         # Interactive but always write PDDL
         interactive()
