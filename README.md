@@ -3,34 +3,47 @@
 
 # JapeAI
 
-JapeAI is an experimental theorem-proving project that models propositional proof construction using three distinct AI approaches, run side-by-side on the same problems for comparison.
+JapeAI is an experimental theorem-proving project that applies three independent AI approaches to first-order logic (FOL) proof construction, run side-by-side on the same problems for comparison.
 
-| Approach | File | Method |
+| Approach | File | Strategy |
 |---|---|---|
-| CSP | `csp/skeleton_csp.py` | Forward search with backtracking + Bayesian guidance |
-| Planning | `planning/` | PDDL encoding + internal forward BFS planner |
-| Backward prover | `logic/rules.py` | Goal-directed recursive backward chaining |
+| CSP | `csp/fol_csp.py` | Iterative-deepening depth-first search with backtracking |
+| PDDL planner | `planning/internal_planner.py` | Uniform breadth-first BFS |
+| Bayes | `cbn/logic_causal.py` | Best-first search guided by Naive Bayes step scores + causal graph d-separation pruning |
+| Backward prover | `logic/fol_prover.py` | Goal-directed recursive backward chaining (used by CLI) |
 
 ---
 
 ## Logic Supported
 
-Formula types:
+### Formula syntax
 
-| Syntax | Meaning |
-|---|---|
-| `P`, `Q`, `R` | Atomic propositions (uppercase) |
-| `A & B` | Conjunction |
-| `A -> B` | Implication |
-| `~A` | Negation |
+| Syntax | Meaning | Notes |
+|---|---|---|
+| `P`, `Q`, `R` | Atomic propositions | Uppercase identifiers |
+| `P(x)`, `T(x,y)` | Predicates | Lowercase arguments |
+| `forall x.P(x)` | Universal quantifier | Also accepts `forall x.(...)` |
+| `exists x.P(x)` | Existential quantifier | Also accepts `exists x.(...)` |
+| `A & B` | Conjunction | Also `/\` |
+| `A \| B` | Disjunction | Also `\/` |
+| `A -> B` | Implication | Right-associative |
+| `~A` | Negation | |
+| `(A -> B)` | Grouping | |
 
-Inference rules:
+### Inference rules
 
-- Assumption
-- Modus Ponens
-- And Introduction
-- And Elimination (left / right)
-- **Implication Introduction** - assume antecedent, derive consequent, discharge hypothesis
+All four solvers handle:
+
+- Assumption / Given
+- Modus Ponens (-> elim)
+- And Introduction / Elimination
+- Implication Introduction (assume antecedent, prove consequent, discharge)
+- ForAll Introduction / Elimination (instantiation)
+- Exists Introduction / Elimination (Skolem constants)
+- Or Introduction / Elimination (case split)
+- Not Introduction (assume positive, derive contradiction)
+- RAA -- Reductio ad Absurdum (classical fallback)
+- Ex Falso (from contradiction, prove anything)
 
 ---
 
@@ -54,20 +67,63 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+tkinter is bundled with Python on Windows and macOS. On Linux install it separately:
+```bash
+sudo apt install python3-tk
+```
+
+---
+
+## Running the GUI
+
+```
+python viz/gui.py
+```
+
+Opens a graphical proof assistant with:
+- Assumptions and Goal entry fields with live Unicode substitution
+- Prove / Clear / Copy buttons
+- Solver selector (CSP / PDDL / Bayes radio buttons)
+- Proof pane showing numbered steps with rule labels and scope bars
+- Given pane showing loaded assumptions as clickable buttons
+- File / Proof / Examples menu bar
+
+**On macOS:** the menu bar (File, Proof, Examples) appears at the top of the screen, not the window -- this is standard macOS behaviour.
+
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| Ctrl+Return | Prove |
+| Ctrl+L | Clear |
+| Ctrl+C | Copy proof |
+| Ctrl+Q | Quit |
+
+### Symbol shortcuts (type in any entry field)
+
+| Type | Gets |
+|---|---|
+| `->` | -> (implication arrow) |
+| `forall` | forall |
+| `exists` | exists |
+| `/\` | /\ (conjunction) |
+| `\/` | \/ (disjunction) |
+| `~` | ~ (negation) |
+| `\|-` | |- (turnstile) |
+
 ---
 
 ## Running the CLI
 
-### Interactive mode (default)
+### Interactive mode
 ```
 python main.py
 ```
-You are prompted for assumptions and a goal. All three solvers run and print their proofs side-by-side.
+Prompts for assumptions and a goal. Runs all four solvers and prints results.
 
 ```
 Assumptions (comma-separated, or blank): P, P -> Q, Q -> R
 Goal: R
-Write PDDL file? [y/N]: n
 
 ============================================================
 Assumptions : ['P', '(P -> Q)', '(Q -> R)']
@@ -75,93 +131,81 @@ Goal        : R
 ============================================================
 
 [CSP solver]
-  Proof (2 top-level step(s)):
-    Step 0: Q  by modus_ponens, P, (P -> Q)
-    Step 1: R  by modus_ponens, (Q -> R), Q
+  Step 0: Q  by mp
+  Step 1: R  by mp
 
-[Internal PDDL planner]
-  Plan (2 steps):
-    1. modus-ponens(P, Q, (P -> Q))
-    2. modus-ponens(Q, R, (Q -> R))
+[PDDL planner]
+  Step 0: mp(P, (P -> Q)) => Q
+  Step 1: mp(Q, (Q -> R)) => R
 
-[Backward logic prover]
-  Proof tree:
-  R         by MP
-   Q         by MP
-    P         by Assumption
-    (P -> Q)         by Given
-   (Q -> R)         by Given
+[Bayes solver]
+  Step 0: Q  by mp
+  Step 1: R  by mp
+
+[Backward prover]
+  Q   by -> elim
+  P   by assumption
+  R   by -> elim
 ```
 
-### Demo mode
-```
-python main.py --demo
-```
-Runs 8 built-in problems covering all rule types including ImpIntro, long chains, and unprovable cases.
+### Flags
+
+| Flag | Effect |
+|---|---|
+| `--demo` | Run all built-in example problems |
+| `--pddl` | Also write a .pddl problem file |
+| `--causal` | Run Bayes (CBN) solver only |
+| `--causal-demo` | Run Bayes solver on all demo problems |
 
 ---
 
 ## Formula Syntax Reference
 
 ```
-Atoms       P  Q  R  ABC           uppercase identifiers
-Negation    ~P
-Conjunction P & Q
-Implication P -> Q                 right-associative
-Grouping    (P & Q) -> R
-```
-
-Examples of valid goals:
-```
-P -> P
-(P & Q) -> (Q & P)
-P -> (Q -> P)
-R
+Atoms           P  Q  R  ABC        uppercase identifiers
+Predicates      T(x)  R(x,y)        uppercase name, lowercase args
+Variables       x  y  z             lowercase (used inside quantifiers)
+Negation        ~P
+Conjunction     P & Q
+Disjunction     P | Q
+Implication     P -> Q              right-associative
+ForAll          forall x.P(x)
+Exists          exists x.P(x)
+Grouping        (P & Q) -> R
 ```
 
 ---
 
 ## Approach 1: CSP (Constraint Satisfaction)
 
-**File:** `csp/skeleton_csp.py`
+**Files:** `csp/fol_csp.py`, `csp/skeleton_csp.py`
 
-Models proof construction as a bounded constraint problem:
-- each proof step is a variable that can take values from a finite formula domain
-- constraints enforce rule correctness at each step
-- backtracking search finds a valid proof skeleton
+Models proof construction as a bounded constraint problem. Each proof step is a variable that takes a value from a finite formula domain; constraints enforce rule correctness.
 
 **Key features:**
-- `solve_csp()` - iterative deepening wrapper; automatically finds the shortest proof without needing to guess a step bound
-- `solve_bounded_csp()` - fixed-depth version for when you know the bound
-- **Implication Introduction** - handled as a recursive sub-proof: to prove `A -> B`, the solver assumes `A` and proves `B` in a nested scope, then discharges the hypothesis
-- Bayesian guidance - optional reordering and pruning of candidates using Naive Bayes scores (formula usefulness, rule success, partial proof success probability)
-
-**Example problems:**
-
-| Problem | Assumptions | Goal |
-|---|---|---|
-| Modus Ponens | `P`, `P -> Q` | `Q` |
-| AND elimination | `P & Q` | `P` |
-| Chain | `P`, `P->Q`, `Q->R`, `R->S` | `S` |
-| ImpIntro (tautology) | _(none)_ | `P -> P` |
-| AND commutativity | _(none)_ | `(P & Q) -> (Q & P)` |
-| K tautology | _(none)_ | `P -> (Q -> P)` |
+- `solve_fol_csp()` -- FOL solver with iterative deepening; tries direct proofs first, then classical RAA
+- `solve_csp()` -- propositional solver (legacy, still tested)
+- Two-pass strategy: direct proofs always preferred over RAA proofs of the same length
+- Bayesian guidance -- reorders candidates using Naive Bayes step-success scores
 
 **Programmatic usage:**
 ```python
 from parser.parser import parse_formula
-from csp.skeleton_csp import solve_csp, print_csp_proof
+from csp.fol_csp import solve_fol_csp, render_fol_csp_steps
 
-assumptions = [parse_formula("P"), parse_formula("P -> Q")]
-goal = parse_formula("Q")
+assumptions = [parse_formula("forall y.(T(y) -> Q(y))"), parse_formula("forall y.T(y)")]
+goal = parse_formula("forall y.Q(y)")
 
-result = solve_csp(assumptions, goal)
-print_csp_proof(result)
+result = solve_fol_csp(assumptions, goal)
+lines = []
+render_fol_csp_steps(result, lines)
+for depth, formula, rule, note in lines:
+    print("  " * depth + formula + "   by " + rule)
 ```
 
 ---
 
-## Approach 2: Planning (PDDL)
+## Approach 2: PDDL Planner
 
 **Files:** `planning/domain.pddl`, `planning/encoder.py`, `planning/internal_planner.py`
 
@@ -170,26 +214,22 @@ Models theorem proving as a classical planning problem:
 ```
 state   = set of known formulas
 actions = inference rules
-goal    = target theorem is known
+goal    = target theorem is in the known set
 ```
 
-### Internal planner
-
-`planning/internal_planner.py` implements a forward BFS planner that works directly on `Formula` objects - no external tool needed.
+`planning/internal_planner.py` implements a forward BFS planner that works directly on Formula objects -- no external tool needed. Two-pass: direct proofs first, then RAA.
 
 ```python
 from parser.parser import parse_formula
-from planning.internal_planner import plan_and_print
+from planning.internal_planner import plan_forward
 
-plan_and_print(
-    [parse_formula("P"), parse_formula("P -> Q")],
-    parse_formula("Q"),
+result = plan_forward(
+    [parse_formula("exists y.T(y)"), parse_formula("forall y.(T(y) -> R(y))")],
+    parse_formula("exists y.R(y)"),
 )
 ```
 
 ### External PDDL planner
-
-Generate a `.pddl` problem file and load it into any STRIPS planner:
 
 ```python
 from parser.parser import parse_formula
@@ -203,25 +243,56 @@ write_problem_file(
 )
 ```
 
-Then open [editor.planning.domains](https://editor.planning.domains/), load `planning/domain.pddl` and your problem file, and run BFWS.
-
-**PDDL domain actions:** `modus-ponens`, `and-elim-left`, `and-elim-right`, `and-intro`, `imp-intro-weaken`
+Load `planning/domain.pddl` and the generated file into any STRIPS planner (e.g. editor.planning.domains).
 
 ---
 
-## Approach 3: Backward Logic Prover
+## Approach 3: Bayes Solver (Bayesian Network / CBN)
 
-**File:** `logic/rules.py`
+**File:** `cbn/logic_causal.py`
 
-Goal-directed recursive backward chaining. Supports all five rules including full Implication Introduction (scoped hypothetical reasoning).
+A genuinely independent third solver using three mechanisms not shared with CSP or PDDL:
+
+1. **Causal graph + d-separation filter** -- builds a directed acyclic graph from implications in the assumption set and uses the Bayes-ball algorithm to prune causally irrelevant formulas before search begins.
+
+2. **Best-first probabilistic search** -- a priority queue scored by cumulative Naive Bayes step-success probabilities. Always expands the most promising proof state next (unlike CSP depth-first or PDDL breadth-first).
+
+3. **Full FOL structural decomposition** -- the same intro/elim rules as the other solvers, applied as goal-directed reductions before the forward search.
 
 ```python
 from parser.parser import parse_formula
-from logic.rules import prove
-from logic.proof_tree import print_proof
+from cbn.logic_causal import solve_logic_causal, render_logic_causal_steps
 
-result = prove(parse_formula("(P & Q) -> (Q & P)"), set())
-print_proof(result)
+result = solve_logic_causal(
+    [parse_formula("forall x.(P(x) -> T(x))")],
+    parse_formula("exists x.P(x) -> exists x.T(x)"),
+)
+lines = []
+render_logic_causal_steps(result, lines)
+for depth, formula, rule, note in lines:
+    print("  " * depth + formula + "   by " + rule)
+```
+
+---
+
+## Approach 4: Backward Logic Prover
+
+**File:** `logic/fol_prover.py`
+
+Goal-directed recursive backward chaining. Used by the CLI to provide a fourth independent view of the proof.
+
+```python
+from parser.parser import parse_formula
+from logic.fol_prover import prove_fol, render_fol_proof
+
+result = prove_fol(
+    parse_formula("(P & Q) -> (Q & P)"),
+    [],
+)
+lines = []
+render_fol_proof(result, lines)
+for depth, formula, rule, note in lines:
+    print("  " * depth + formula + "   by " + rule)
 ```
 
 ---
@@ -230,16 +301,14 @@ print_proof(result)
 
 **Files:** `bayes/features.py`, `bayes/scorer.py`, `bayes/trainer.py`
 
-A Naive Bayes scoring layer integrated into the CSP solver. Four configurable scorers guide the search:
+A Naive Bayes scoring layer shared by the CSP and Bayes solvers. Four toggles in `csp/skeleton_csp.py`:
 
 | Toggle | Effect |
 |---|---|
-| `BN_FORMULA_REORDER` | Reorder the formula domain by predicted usefulness |
+| `BN_FORMULA_REORDER` | Reorder formula domain by predicted usefulness |
 | `BN_RULE_REORDER` | Try rules in order of predicted success probability |
 | `BN_STEP_REORDER` | Rank candidate steps by predicted success |
 | `BN_PARTIAL_CUTOFF` | Prune branches with very low success probability |
-
-These are on by default and can be toggled at the top of `csp/skeleton_csp.py`.
 
 ---
 
@@ -249,11 +318,14 @@ These are on by default and can be toggled at the top of `csp/skeleton_csp.py`.
 pytest
 ```
 
-48 tests covering parser, AST, logic rules, CSP (forward rules + ImpIntro + iterative deepening + longer chains), search (A* and BFS), and the internal PDDL planner.
+259 tests covering parser, AST, FOL prover, CSP (propositional + FOL), PDDL planner (propositional + FOL), Bayes solver (propositional + FOL Levels 1-3), causal graph, d-separation, SCM, A* and BFS search.
 
 ```
-pytest -v              # verbose output
-pytest tests/test_csp.py   # CSP tests only
+pytest -v                          # verbose output
+pytest tests/test_csp.py           # CSP tests only
+pytest tests/test_bayes_solver.py  # Bayes solver tests only
+pytest tests/test_fol_prover.py    # backward prover tests only
+pytest --cov=. --cov-report=term   # coverage report
 ```
 
 ---
@@ -262,11 +334,13 @@ pytest tests/test_csp.py   # CSP tests only
 
 ```
 parser/         formula parser and AST
-logic/          backward prover, matcher, proof tree
-csp/            CSP solver with Bayesian guidance
-planning/       PDDL domain, encoder, internal planner
-search/         A* and BFS search over proof states
+logic/          FOL backward prover, matcher, proof tree
+csp/            CSP solver (propositional + FOL) with Bayesian guidance
+planning/       PDDL domain, encoder, internal BFS planner
+cbn/            Bayes/CBN solver, causal graph, d-separation, SCM, NL solver
 bayes/          Naive Bayes feature extraction and scoring
+search/         A* and BFS search over proof states
+viz/            GUI (tkinter)
 tests/          pytest test suite
 main.py         interactive CLI and demo runner
 ```
@@ -275,8 +349,9 @@ main.py         interactive CLI and demo runner
 
 ## Project Goal
 
-Explore and compare three AI paradigms applied to the same logical reasoning task:
+Explore and compare four AI paradigms applied to the same logical reasoning task:
 
-> logic -> constraint satisfaction
-> logic -> classical planning
-> logic -> probabilistic guidance
+- logic -> constraint satisfaction (iterative deepening DFS)
+- logic -> classical planning (BFS)
+- logic -> probabilistic guidance (Bayesian best-first + causal graph)
+- logic -> backward chaining (goal-directed recursion)

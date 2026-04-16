@@ -5,6 +5,7 @@ from csp.skeleton_csp import (
     CSPImpIntroStep,
     print_csp_proof,
 )
+from csp.fol_csp import solve_fol_csp
 
 
 def print_result(name, assumptions, goal, result):
@@ -253,3 +254,175 @@ def test_internal_planner_failure():
     result = plan_forward(assumptions, goal, max_depth=5)
     assert result is None
     print("\n[internal planner] correctly returned None for unprovable P |- Q")
+
+
+# ────────────────────────────────────────────────
+# FOL CSP solver tests
+# ────────────────────────────────────────────────
+
+def _pf(s: str):
+    return parse_formula(s)
+
+
+def _fol_rules(result) -> list[str]:
+    """Flatten all rule names from a FOLProofStep tree."""
+    from csp.fol_csp import FOLStep
+    rules = []
+    for s in result:
+        if hasattr(s, "rule"):
+            rules.append(s.rule)
+        if hasattr(s, "sub_steps"):
+            rules.extend(_fol_rules(list(s.sub_steps)))
+        for attr in ("left_steps", "right_steps", "contra_steps"):
+            if hasattr(s, attr):
+                rules.extend(_fol_rules(list(getattr(s, attr))))
+    return rules
+
+
+def _fol_conclusions(result) -> list[str]:
+    out = []
+    for s in result:
+        if hasattr(s, "formula"):
+            out.append(str(s.formula))
+        if hasattr(s, "sub_steps"):
+            out.extend(_fol_conclusions(list(s.sub_steps)))
+        for attr in ("left_steps", "right_steps", "contra_steps"):
+            if hasattr(s, attr):
+                out.extend(_fol_conclusions(list(getattr(s, attr))))
+    return out
+
+
+# --- Propositional (FOL solver handles propositional as a special case) ---
+
+def test_fol_csp_modus_ponens():
+    result = solve_fol_csp([_pf("P"), _pf("P -> Q")], _pf("Q"))
+    assert result is not None
+    assert "mp" in _fol_rules(result)
+
+
+def test_fol_csp_and_intro():
+    result = solve_fol_csp([_pf("P"), _pf("Q")], _pf("P & Q"))
+    assert result is not None
+    assert "and_intro" in _fol_rules(result)
+
+
+def test_fol_csp_imp_intro_tautology():
+    result = solve_fol_csp([], _pf("P -> P"))
+    assert result is not None
+    assert "imp_intro" in _fol_rules(result)
+
+
+def test_fol_csp_and_commutativity():
+    result = solve_fol_csp([], _pf("(P & Q) -> (Q & P)"))
+    assert result is not None
+
+
+def test_fol_csp_unprovable():
+    result = solve_fol_csp([_pf("P")], _pf("Q"))
+    assert result is None
+
+
+# --- FOL Warm-up ---
+
+def test_fol_csp_warmup_forall_mp():
+    """forall y.(T(y)->Q(y)), forall y.T(y) |- forall y.Q(y)"""
+    result = solve_fol_csp(
+        [_pf("forall y.(T(y) -> Q(y))"), _pf("forall y.T(y)")],
+        _pf("forall y.Q(y)"),
+    )
+    assert result is not None
+
+
+# --- FOL Level 1 ---
+
+def test_fol_csp_level1_forall_exists():
+    """forall y.(T(y)->Q(y)/\R(y)) |- forall y.(T(y)->exists z.Q(z))"""
+    result = solve_fol_csp(
+        [_pf("forall y.(T(y) -> (Q(y) & R(y)))")],
+        _pf("forall y.(T(y) -> exists z.Q(z))"),
+    )
+    assert result is not None
+
+
+def test_fol_csp_level1_disjunction():
+    """exists y.Q(y) \/ exists z.S(z) |- exists x.(S(x) \/ Q(x))"""
+    result = solve_fol_csp(
+        [_pf("exists y.Q(y) | exists z.S(z)")],
+        _pf("exists x.(S(x) | Q(x))"),
+    )
+    assert result is not None
+
+
+def test_fol_csp_level1_exists_forall():
+    """exists y.T(y), forall y.(T(y)->R(y)) |- exists y.R(y)"""
+    result = solve_fol_csp(
+        [_pf("exists y.T(y)"), _pf("forall y.(T(y) -> R(y))")],
+        _pf("exists y.R(y)"),
+    )
+    assert result is not None
+
+
+# --- FOL Level 2 ---
+
+def test_fol_csp_level2_neg_push():
+    """forall x.forall z.(~Q(z)/\S(x)) |- ~exists x.forall z.(S(x)->Q(z))"""
+    result = solve_fol_csp(
+        [_pf("forall x.forall z.(~Q(z) & S(x))")],
+        _pf("~exists x.forall z.(S(x) -> Q(z))"),
+    )
+    assert result is not None
+
+
+def test_fol_csp_level2_case_split():
+    """exists x.~Q(x), forall x.R(x)\/forall x.Q(x), forall x.(R(x)->T(x)) |- forall x.T(x)"""
+    result = solve_fol_csp(
+        [
+            _pf("exists x.~Q(x)"),
+            _pf("forall x.R(x) | forall x.Q(x)"),
+            _pf("forall x.(R(x) -> T(x))"),
+        ],
+        _pf("forall x.T(x)"),
+    )
+    assert result is not None
+
+
+def test_fol_csp_level2_or_elim():
+    """forall y.T(y)\/forall y.S(y), exists y.~T(y), forall y.(S(y)->P(y)) |- forall y.P(y)"""
+    result = solve_fol_csp(
+        [
+            _pf("forall y.T(y) | forall y.S(y)"),
+            _pf("exists y.~T(y)"),
+            _pf("forall y.(S(y) -> P(y))"),
+        ],
+        _pf("forall y.P(y)"),
+    )
+    assert result is not None
+
+
+# --- PDDL FOL tests ---
+
+def test_pddl_warmup_forall_mp():
+    from planning.internal_planner import plan_forward
+    result = plan_forward(
+        [_pf("forall y.(T(y) -> Q(y))"), _pf("forall y.T(y)")],
+        _pf("forall y.Q(y)"),
+    )
+    assert result is not None
+
+
+def test_pddl_level1_exists_forall():
+    from planning.internal_planner import plan_forward
+    result = plan_forward(
+        [_pf("exists y.T(y)"), _pf("forall y.(T(y) -> R(y))")],
+        _pf("exists y.R(y)"),
+    )
+    assert result is not None
+
+
+def test_pddl_level1_disjunction():
+    from planning.internal_planner import plan_forward
+    result = plan_forward(
+        [_pf("exists y.Q(y) | exists z.S(z)")],
+        _pf("exists x.(S(x) | Q(x))"),
+    )
+    assert result is not None

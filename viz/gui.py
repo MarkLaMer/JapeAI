@@ -25,6 +25,8 @@ from csp.fol_csp import solve_fol_csp, render_fol_csp_steps
 from planning.internal_planner import plan_forward
 from cbn.logic_causal import solve_logic_causal, render_logic_causal_steps
 
+_MACOS   = sys.platform == "darwin"
+_WINDOWS = sys.platform == "win32"
 
 # ---------------------------------------------------------------------------
 # Colour scheme — modern light theme
@@ -53,17 +55,69 @@ C_BTN_DIS_FG    = "#9CA3AF"
 
 C_CAUSAL_BADGE  = "#0369A1"   # sky-blue accent for the "Causal" solver label
 
-FONT_FORMULA  = ("Palatino Linotype", 14)
-FONT_FORMULA_B= ("Palatino Linotype", 14, "bold")
-FONT_RULE     = ("Segoe UI", 10)
-FONT_STEPNUM  = ("Segoe UI", 10)
-FONT_TOOLBAR  = ("Segoe UI", 10)
-FONT_GIVEN_BTN= ("Palatino Linotype", 12)
-FONT_TITLE    = ("Segoe UI", 11, "bold")
-FONT_MONO     = ("Consolas", 10)
+if _MACOS:
+    _serif  = "Palatino"
+    _sans   = "Helvetica Neue"
+    _mono   = "Menlo"
+    _sz_off = 1          # macOS renders fonts ~1pt larger than Windows
+else:
+    _serif  = "Palatino Linotype"
+    _sans   = "Segoe UI"
+    _mono   = "Consolas"
+    _sz_off = 0
+
+FONT_FORMULA  = (_serif,  14)
+FONT_FORMULA_B= (_serif,  14, "bold")
+FONT_RULE     = (_sans,   10 + _sz_off)
+FONT_STEPNUM  = (_sans,   10 + _sz_off)
+FONT_TOOLBAR  = (_sans,   10 + _sz_off)
+FONT_GIVEN_BTN= (_serif,  12)
+FONT_TITLE    = (_sans,   11 + _sz_off, "bold")
+FONT_MONO     = (_mono,   10 + _sz_off)
 
 BTN_HYP_BG  = "#EEF2FF"
 BTN_HYP_ACT = "#E0E7FF"
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform widget helpers
+# ---------------------------------------------------------------------------
+
+def _btn_kw(**kw) -> dict:
+    """
+    On macOS the Aqua theme ignores bg/fg/relief/activebackground on tk.Button.
+    Passing them anyway causes visual glitches (oversized border, wrong colour).
+    Strip those keys on macOS so the native Aqua button style is used cleanly.
+    """
+    if _MACOS:
+        for key in ("bg", "fg", "activebackground", "activeforeground",
+                    "relief", "bd", "cursor"):
+            kw.pop(key, None)
+    return kw
+
+
+def _entry_kw(**kw) -> dict:
+    """
+    On macOS, highlightbackground / highlightcolor clash with the native focus
+    ring and make entry boxes look wrong.  Strip them so Aqua handles focus.
+    """
+    if _MACOS:
+        for key in ("highlightthickness", "highlightcolor", "highlightbackground",
+                    "relief", "bd"):
+            kw.pop(key, None)
+    return kw
+
+
+def _radio_kw(**kw) -> dict:
+    """
+    On macOS, selectcolor renders as an ugly coloured square inside the
+    radiobutton indicator.  Drop it and let Aqua draw its native tick.
+    """
+    if _MACOS:
+        kw.pop("selectcolor", None)
+        kw.pop("activebackground", None)
+    return kw
+
 
 # ---------------------------------------------------------------------------
 # Example problems
@@ -119,19 +173,6 @@ EXAMPLES = [
         ["∃y.(Q(y)→T(y))∧∀y.((T(y)∧Q(y))∨Q(y))"],                        "∃y.(T(y)∧Q(y))"),
     ("∀y.¬(T(y)∨∃z.P(z))  ⊢  ¬∃y.(¬∃z.P(z)→T(y))",
         ["∀y.¬(T(y)∨∃z.P(z))"],                                           "¬∃y.(¬∃z.P(z)→T(y))"),
-    # ── Causal / CBN (same Assumptions+Goal format as other solvers) ──────────
-    None,
-    ("Causal CBN",),
-    ("P, P→Q, Q→R  ⊢  R  [CBN chain]",
-        ["P", "P→Q", "Q→R"],                      "R"),
-    ("P, P→Q, Q→R, R→S  ⊢  S  [long chain]",
-        ["P", "P→Q", "Q→R", "R→S"],               "S"),
-    ("P∧Q, (P∧Q)→R  ⊢  R  [and-elim + MP]",
-        ["P & Q", "(P & Q)→R"],                    "R"),
-    ("P, Q  ⊢  P∧Q  [and-intro]",
-        ["P", "Q"],                                "P & Q"),
-    ("P∧Q  ⊢  P  [and-elim]",
-        ["P & Q"],                                 "P"),
 ]
 
 
@@ -353,15 +394,15 @@ class JapeAIApp:
         self._lbl_assumptions.grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._assumptions_entry = tk.Entry(
             row1, font=FONT_MONO,
-            relief=tk.SOLID, bd=1,
-            highlightthickness=1, highlightcolor=C_ACCENT,
-            highlightbackground=C_SEP,
+            **_entry_kw(relief=tk.SOLID, bd=1,
+                        highlightthickness=1, highlightcolor=C_ACCENT,
+                        highlightbackground=C_SEP),
         )
         self._assumptions_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         self._assumptions_entry.bind("<Return>", lambda _: self._on_prove())
         self._wire_substitutions(self._assumptions_entry)
 
-        tk.Label(row1, text="⊢", font=("Palatino Linotype", 15),
+        tk.Label(row1, text="⊢", font=(_serif, 15),
                  bg=BG_TOOLBAR, fg=C_SCOPE).grid(row=0, column=2, padx=4)
 
         self._lbl_goal = tk.Label(row1, text="Goal:", font=FONT_TOOLBAR,
@@ -369,9 +410,9 @@ class JapeAIApp:
         self._lbl_goal.grid(row=0, column=3, sticky="w", padx=(0, 4))
         self._goal_entry = tk.Entry(
             row1, font=FONT_MONO,
-            relief=tk.SOLID, bd=1,
-            highlightthickness=1, highlightcolor=C_ACCENT,
-            highlightbackground=C_SEP,
+            **_entry_kw(relief=tk.SOLID, bd=1,
+                        highlightthickness=1, highlightcolor=C_ACCENT,
+                        highlightbackground=C_SEP),
         )
         self._goal_entry.grid(row=0, column=4, sticky="ew")
         self._goal_entry.bind("<Return>", lambda _: self._on_prove())
@@ -383,28 +424,30 @@ class JapeAIApp:
         row2.pack(fill=tk.X, padx=10, pady=(0, 5))
 
         self._prove_btn = tk.Button(
-            row2, text="Prove", font=("Segoe UI", 10, "bold"),
-            bg=C_BTN_PROVE_BG, fg=C_BTN_PROVE_FG,
-            activebackground=C_BTN_PROVE_ACT, activeforeground=C_BTN_PROVE_FG,
-            relief=tk.FLAT, padx=14, pady=3,
-            cursor="hand2", command=self._on_prove,
+            row2, text="Prove", font=(_sans, 10, "bold"),
+            padx=14, pady=3, command=self._on_prove,
+            **_btn_kw(bg=C_BTN_PROVE_BG, fg=C_BTN_PROVE_FG,
+                      activebackground=C_BTN_PROVE_ACT,
+                      activeforeground=C_BTN_PROVE_FG,
+                      relief=tk.FLAT, cursor="hand2"),
         )
         self._prove_btn.pack(side=tk.LEFT, padx=(0, 4))
 
         tk.Button(
             row2, text="Clear", font=FONT_TOOLBAR,
-            bg=C_BTN_2_BG, fg=C_BTN_2_FG,
-            activebackground=C_BTN_2_ACT,
-            relief=tk.FLAT, padx=10, pady=3,
-            cursor="hand2", command=self._on_clear,
+            padx=10, pady=3, command=self._on_clear,
+            **_btn_kw(bg=C_BTN_2_BG, fg=C_BTN_2_FG,
+                      activebackground=C_BTN_2_ACT,
+                      relief=tk.FLAT, cursor="hand2"),
         ).pack(side=tk.LEFT, padx=(0, 3))
 
         self._copy_btn = tk.Button(
             row2, text="Copy", font=FONT_TOOLBAR,
-            bg=C_BTN_2_BG, fg=C_BTN_DIS_FG,
-            activebackground=C_BTN_2_ACT, activeforeground=C_BTN_2_FG,
-            relief=tk.FLAT, padx=10, pady=3,
-            cursor="hand2", command=self._on_copy, state=tk.DISABLED,
+            padx=10, pady=3, command=self._on_copy, state=tk.DISABLED,
+            **_btn_kw(bg=C_BTN_2_BG, fg=C_BTN_DIS_FG,
+                      activebackground=C_BTN_2_ACT,
+                      activeforeground=C_BTN_2_FG,
+                      relief=tk.FLAT, cursor="hand2"),
         )
         self._copy_btn.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -416,10 +459,9 @@ class JapeAIApp:
         for label, value in [("CSP", "csp"), ("PDDL", "pddl"), ("Bayes", "causal")]:
             tk.Radiobutton(
                 solver_frame, text=label, variable=self._solver_var,
-                value=value, font=FONT_TOOLBAR, bg=BG_TOOLBAR,
-                fg=C_TEXT, selectcolor=BG_TOOLBAR,
-                activebackground=BG_TOOLBAR,
+                value=value, font=FONT_TOOLBAR, bg=BG_TOOLBAR, fg=C_TEXT,
                 command=self._on_solver_change,
+                **_radio_kw(selectcolor=BG_TOOLBAR, activebackground=BG_TOOLBAR),
             ).pack(side=tk.LEFT, padx=4)
 
         self._status_label = tk.Label(
@@ -442,13 +484,12 @@ class JapeAIApp:
         for display, sym in SYMBOLS:
             tk.Button(
                 row3, text=display,
-                font=("Palatino Linotype", 12),
-                bg=BTN_HYP_BG, fg=C_SCOPE,
-                activebackground=BTN_HYP_ACT,
-                relief=tk.FLAT, bd=0,
+                font=(_serif, 12),
                 padx=7, pady=1,
-                cursor="hand2",
                 command=lambda s=sym: self._insert_symbol(s),
+                **_btn_kw(bg=BTN_HYP_BG, fg=C_SCOPE,
+                          activebackground=BTN_HYP_ACT,
+                          relief=tk.FLAT, bd=0, cursor="hand2"),
             ).pack(side=tk.LEFT, padx=1)
 
     # -----------------------------------------------------------------------
@@ -468,7 +509,7 @@ class JapeAIApp:
 
         self._proof_header = tk.Label(
             proof_outer, text="Proof",
-            font=("Segoe UI", 9, "bold"),
+            font=(_sans, 9, "bold"),
             bg=BG_ROOT, fg=C_STEPNUM, anchor="w",
             padx=12, pady=4,
         )
@@ -486,7 +527,7 @@ class JapeAIApp:
 
         tk.Label(
             given_outer, text="Given",
-            font=("Segoe UI", 9, "bold"),
+            font=(_sans, 9, "bold"),
             bg=BG_ROOT, fg=C_STEPNUM, anchor="w",
             padx=12, pady=4,
         ).pack(fill=tk.X)
@@ -775,13 +816,11 @@ class JapeAIApp:
                 frame,
                 text=str(formula),
                 font=FONT_GIVEN_BTN,
-                bg=BTN_HYP_BG,
-                fg=C_SCOPE,
-                activebackground=BTN_HYP_ACT,
-                activeforeground=C_SCOPE,
-                relief=tk.FLAT, bd=0,
                 padx=12, pady=5,
-                cursor="hand2",
+                **_btn_kw(bg=BTN_HYP_BG, fg=C_SCOPE,
+                          activebackground=BTN_HYP_ACT,
+                          activeforeground=C_SCOPE,
+                          relief=tk.FLAT, bd=0, cursor="hand2"),
             )
             btn.pack(side=tk.LEFT, padx=4, pady=4)
 
