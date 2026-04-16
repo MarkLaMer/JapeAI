@@ -16,7 +16,7 @@ from planning.encoder import write_problem_file
 from planning.internal_planner import plan_and_print
 from csp.skeleton_csp import solve_csp, print_csp_proof
 from logic.fol_prover import prove_fol, render_fol_proof
-from cbn.logic_causal import solve_logic_causal
+from cbn.logic_causal import solve_logic_causal, render_logic_causal_steps
 
 
 # --------------------------------------------------------------------------- #
@@ -186,9 +186,47 @@ def solve_causal_problem(
     if result is None:
         print("  No proof found.")
     else:
-        print(f"  Proof ({len(result)} step(s)):")
-        for i, action in enumerate(result, 1):
-            print(f"    {i}. {action}")
+        lines: list = []
+        render_logic_causal_steps(result, lines)
+        non_derived = {"assumption", "assumptions", "premise", "premises", "hyp"}
+        derived = [(d, f, r, n) for (d, f, r, n) in lines if r not in non_derived]
+        print(f"  Proof ({len(derived)} step(s)):")
+        for i, (depth, formula, rule, note) in enumerate(derived, 1):
+            indent = "  " * depth
+            note_str = f"  [{note}]" if note else ""
+            print(f"    {i}. {indent}{formula}   ({rule}){note_str}")
+
+
+def _flag_value(flag: str) -> str | None:
+    """Return the value following *flag* in sys.argv, if present."""
+    try:
+        idx = sys.argv.index(flag)
+    except ValueError:
+        return None
+    if idx + 1 >= len(sys.argv):
+        return None
+    return sys.argv[idx + 1]
+
+
+def run_causal_cli() -> int:
+    """
+    Solve one causal proof from command-line flags.
+
+    Example:
+      python main.py --causal-prove --assumptions "P, P -> Q, Q -> R" --goal "R"
+    """
+    assumptions_arg = _flag_value("--assumptions")
+    goal_arg = _flag_value("--goal")
+    if goal_arg is None:
+        print('Usage: python main.py --causal-prove --assumptions "P, P -> Q" --goal "Q"')
+        return 2
+
+    assumption_strings = (
+        [s.strip() for s in assumptions_arg.split(",") if s.strip()]
+        if assumptions_arg else []
+    )
+    solve_causal_problem(assumption_strings, goal_arg)
+    return 0
 
 
 def run_causal_demos() -> None:
@@ -248,6 +286,8 @@ def interactive_causal() -> None:
 if __name__ == "__main__":
     if "--demo" in sys.argv:
         run_demos()
+    elif "--causal-prove" in sys.argv:
+        raise SystemExit(run_causal_cli())
     elif "--causal-demo" in sys.argv:
         run_causal_demos()
     elif "--causal" in sys.argv:

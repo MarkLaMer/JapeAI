@@ -697,6 +697,7 @@ class TestLogicCausal:
 
 def test_logic_causal_is_independent_from_csp(monkeypatch):
     from csp import fol_csp
+    from csp.fol_csp import FOLStep
 
     def _boom(*args, **kwargs):
         raise AssertionError("CBN solver delegated to CSP")
