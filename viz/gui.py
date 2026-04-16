@@ -260,7 +260,7 @@ class JapeAIApp:
         for label, value in [
             ("CSP  (forward + FOL)",        "csp"),
             ("PDDL planner  (forward BFS)", "pddl"),
-            ("Causal  (CBN / SCM)",         "causal"),
+            ("Bayes  (CBN / SCM)",          "causal"),
         ]:
             solver_menu.add_radiobutton(
                 label=label, variable=self._solver_var, value=value,
@@ -413,7 +413,7 @@ class JapeAIApp:
 
         solver_frame = tk.Frame(row2, bg=BG_TOOLBAR)
         solver_frame.pack(side=tk.LEFT)
-        for label, value in [("CSP", "csp"), ("PDDL", "pddl"), ("Causal", "causal")]:
+        for label, value in [("CSP", "csp"), ("PDDL", "pddl"), ("Bayes", "causal")]:
             tk.Radiobutton(
                 solver_frame, text=label, variable=self._solver_var,
                 value=value, font=FONT_TOOLBAR, bg=BG_TOOLBAR,

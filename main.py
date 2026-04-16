@@ -15,8 +15,7 @@ from parser.parser import parse_formula
 from planning.encoder import write_problem_file
 from planning.internal_planner import plan_and_print
 from csp.skeleton_csp import solve_csp, print_csp_proof
-from logic.rules import prove
-from logic.proof_tree import print_proof
+from logic.fol_prover import prove_fol, render_fol_proof
 from cbn.logic_causal import solve_logic_causal
 
 
@@ -61,14 +60,18 @@ def solve_problem(
     print("\n[Internal PDDL planner]")
     plan_and_print(assumptions, goal)
 
-    # ── Backward logic prover ────────────────────────────────────────────────
+    # ── Backward logic prover (FOL) ──────────────────────────────────────────
     print("\n[Backward logic prover]")
-    logic_result = prove(goal, set(assumptions))
+    logic_result = prove_fol(goal, assumptions)
     if logic_result is None:
         print("  No proof found.")
     else:
-        print("  Proof tree:")
-        print_proof(logic_result, indent=2)
+        lines = []
+        render_fol_proof(logic_result, lines)
+        for depth, formula, rule, note in lines:
+            pad = "  " * (depth + 1)
+            note_str = f"  [{note}]" if note else ""
+            print(f"{pad}{formula}   by {rule}{note_str}")
 
     # ── Optionally write PDDL problem file ───────────────────────────────────
     if write_pddl:
