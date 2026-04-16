@@ -107,6 +107,28 @@ def test_graph_unknown_node_raises():
         CausalGraph(nodes=["A"], edges=[("A", "B")])
 
 
+def test_graph_method_unknown_node_raises():
+    g = CausalGraph(nodes=["A", "B"], edges=[("A", "B")])
+    with pytest.raises(ValueError, match="Unknown node"):
+        g.parents("C")
+    with pytest.raises(ValueError, match="Unknown node"):
+        g.children("C")
+    with pytest.raises(ValueError, match="Unknown node"):
+        g.markov_blanket("C")
+
+
+def test_d_separated_unknown_node_raises():
+    g = CausalGraph(nodes=["A", "B"], edges=[("A", "B")])
+    with pytest.raises(ValueError, match="Unknown graph node"):
+        g.d_separated("A", "C")
+
+
+def test_trace_unknown_node_raises():
+    g = CausalGraph(nodes=["A", "B"], edges=[("A", "B")])
+    with pytest.raises(ValueError, match="Unknown graph node"):
+        d_separation_trace(g, "A", "C")
+
+
 # ===========================================================================
 # 2.  D-separation — Bayes-ball
 # ===========================================================================
@@ -287,6 +309,30 @@ def test_scm_sample_trace():
     assert len(steps) == 4  # one per node
     for step in steps:
         assert step.kind in ("sample", "intervene")
+
+
+def test_scm_unknown_intervention_raises():
+    scm = make_wet_grass_scm()
+    with pytest.raises(ValueError, match="interventions contains unknown variables"):
+        scm.sample(interventions={"Unknown": 1})
+
+
+def test_scm_unknown_noise_override_raises():
+    scm = make_wet_grass_scm()
+    with pytest.raises(ValueError, match="noise_override contains unknown variables"):
+        scm.sample(noise_override={"Unknown": 0})
+
+
+def test_scm_unknown_marginal_query_raises():
+    scm = make_wet_grass_scm()
+    with pytest.raises(ValueError, match="Unknown query node"):
+        scm.marginal("Unknown")
+
+
+def test_scm_unknown_abduction_observation_raises():
+    scm = make_wet_grass_scm()
+    with pytest.raises(ValueError, match="observations contains unknown variables"):
+        scm.abduction({"Unknown": 1})
 
 
 # ===========================================================================
@@ -547,11 +593,11 @@ def test_dsep_same_node():
     assert g.d_separated("Rain", "Rain") is False
 
 
-def test_dsep_non_existent_node_graceful():
-    """If X or Y not in graph, Bayes-ball just never finds Y → d-separated."""
+def test_dsep_non_existent_node_raises():
+    """Unknown query nodes should raise a clear validation error."""
     g = _wet_grass_graph()
-    # "Fog" is not a node; ball never reaches it
-    assert g.d_separated("Season", "Fog") is True
+    with pytest.raises(ValueError, match="Unknown graph node"):
+        g.d_separated("Season", "Fog")
 
 
 def test_scm_mismatch_raises():
