@@ -9,7 +9,7 @@ JapeAI is an experimental theorem-proving project that applies three independent
 |---|---|---|
 | CSP | `csp/fol_csp.py` | Iterative-deepening depth-first search with backtracking |
 | PDDL planner | `planning/internal_planner.py` | Uniform breadth-first BFS |
-| Bayes | `cbn/logic_causal.py` | Best-first search guided by Naive Bayes step scores + causal graph d-separation pruning |
+| Bayes | `cbn/logic_causal.py` | CBN/SCM-guided factor propagation with recursive structural proof rules |
 | Backward prover | `logic/fol_prover.py` | Goal-directed recursive backward chaining (used by CLI) |
 
 ---
@@ -119,7 +119,7 @@ Opens a graphical proof assistant with:
 ```
 python main.py
 ```
-Prompts for assumptions and a goal. Runs all four solvers and prints results.
+Prompts for assumptions and a goal. Runs CSP, the internal PDDL planner, and the backward prover. The Bayes / CBN solver also has its own CLI modes.
 
 ```
 Assumptions (comma-separated, or blank): P, P -> Q, Q -> R
@@ -138,10 +138,6 @@ Goal        : R
   Step 0: mp(P, (P -> Q)) => Q
   Step 1: mp(Q, (Q -> R)) => R
 
-[Bayes solver]
-  Step 0: Q  by mp
-  Step 1: R  by mp
-
 [Backward prover]
   Q   by -> elim
   P   by assumption
@@ -154,8 +150,9 @@ Goal        : R
 |---|---|
 | `--demo` | Run all built-in example problems |
 | `--pddl` | Also write a .pddl problem file |
-| `--causal` | Run Bayes (CBN) solver only |
-| `--causal-demo` | Run Bayes solver on all demo problems |
+| `--causal` | Run interactive Bayes / CBN / SCM mode only |
+| `--causal-prove` | Run one Bayes / CBN / SCM proof from flags |
+| `--causal-demo` | Run Bayes / CBN / SCM demo problems |
 
 ---
 
@@ -186,7 +183,7 @@ Models proof construction as a bounded constraint problem. Each proof step is a 
 - `solve_fol_csp()` -- FOL solver with iterative deepening; tries direct proofs first, then classical RAA
 - `solve_csp()` -- propositional solver (legacy, still tested)
 - Two-pass strategy: direct proofs always preferred over RAA proofs of the same length
-- Bayesian guidance -- reorders candidates using Naive Bayes step-success scores
+- Optional Bayesian guidance utilities are available elsewhere in the repo, but the FOL CSP solver itself is an iterative-deepening proof search over explicit forward steps and structural sub-proofs
 
 **Programmatic usage:**
 ```python
@@ -247,17 +244,32 @@ Load `planning/domain.pddl` and the generated file into any STRIPS planner (e.g.
 
 ---
 
-## Approach 3: Bayes Solver (Bayesian Network / CBN)
+## Approach 3: Bayes Solver (Bayesian Network / CBN / SCM)
 
-**File:** `cbn/logic_causal.py`
+**Files:** `cbn/logic_causal.py`, `cbn/factor_bp.py`, `cbn/graph.py`, `cbn/scm.py`
 
-A genuinely independent third solver using three mechanisms not shared with CSP or PDDL:
+The Bayes solver is now an independent CBN / SCM-backed proof engine.
 
-1. **Causal graph + d-separation filter** -- builds a directed acyclic graph from implications in the assumption set and uses the Bayes-ball algorithm to prune causally irrelevant formulas before search begins.
+It works in four layers:
 
-2. **Best-first probabilistic search** -- a priority queue scored by cumulative Naive Bayes step-success probabilities. Always expands the most promising proof state next (unlike CSP depth-first or PDDL breadth-first).
+1. **Parse formulas into ASTs** using `parser/parser.py`.
+2. **Build a causal graph** in `cbn/logic_causal.py` by turning implication structure into a DAG over atomic sub-formulas.
+3. **Build an SCM** in `cbn/scm.py` where given atoms are point-mass true, derivable consequents are controlled by structural equations, and unknown atoms default to false.
+4. **Run the factor-style proof engine** in `cbn/factor_bp.py`, which saturates the current context by deterministic propagation and then recursively applies structural natural-deduction rules.
 
-3. **Full FOL structural decomposition** -- the same intro/elim rules as the other solvers, applied as goal-directed reductions before the forward search.
+The Bayes / CBN solver does not delegate proof search to CSP or PDDL. The CBN / SCM layer supplies:
+
+- dependency structure via `CausalGraph`
+- topological ordering for propagation
+- deterministic reachability hints via `SCM.sample()`
+- compatibility with d-separation and other causal queries
+
+The proof engine on top handles:
+
+- forward propagation rules such as `∀ elim`, `∧ elim`, `→ elim`, and target-driven `∧/∨/∃` intro
+- structural rules such as `→ intro`, `∀ intro`, `∃ elim`, `∨ elim`, `¬ intro`, and `RAA`
+
+In deterministic logical problems, the SCM behaves like a hard Bayes net and the solver's fixed-point propagation acts like message passing over that structure.
 
 ```python
 from parser.parser import parse_formula
@@ -301,7 +313,7 @@ for depth, formula, rule, note in lines:
 
 **Files:** `bayes/features.py`, `bayes/scorer.py`, `bayes/trainer.py`
 
-A Naive Bayes scoring layer shared by the CSP and Bayes solvers. Four toggles in `csp/skeleton_csp.py`:
+A Naive Bayes scoring layer used for experimental ranking utilities elsewhere in the repo. It is distinct from the current independent CBN / SCM solver in `cbn/`.
 
 | Toggle | Effect |
 |---|---|
@@ -318,7 +330,7 @@ A Naive Bayes scoring layer shared by the CSP and Bayes solvers. Four toggles in
 pytest
 ```
 
-259 tests covering parser, AST, FOL prover, CSP (propositional + FOL), PDDL planner (propositional + FOL), Bayes solver (propositional + FOL Levels 1-3), causal graph, d-separation, SCM, A* and BFS search.
+260 tests covering parser, AST, FOL prover, CSP (propositional + FOL), PDDL planner (propositional + FOL), Bayes solver (propositional + FOL Levels 1-3), causal graph, d-separation, SCM, A* and BFS search.
 
 ```
 pytest -v                          # verbose output
@@ -335,10 +347,10 @@ pytest --cov=. --cov-report=term   # coverage report
 ```
 parser/         formula parser and AST
 logic/          FOL backward prover, matcher, proof tree
-csp/            CSP solver (propositional + FOL) with Bayesian guidance
+csp/            CSP solver (propositional + FOL)
 planning/       PDDL domain, encoder, internal BFS planner
-cbn/            Bayes/CBN solver, causal graph, d-separation, SCM, NL solver
-bayes/          Naive Bayes feature extraction and scoring
+cbn/            Bayes / CBN / SCM solver, causal graph, d-separation, SCM
+bayes/          Naive Bayes feature extraction and scoring utilities
 search/         A* and BFS search over proof states
 viz/            GUI (tkinter)
 tests/          pytest test suite
@@ -353,5 +365,5 @@ Explore and compare four AI paradigms applied to the same logical reasoning task
 
 - logic -> constraint satisfaction (iterative deepening DFS)
 - logic -> classical planning (BFS)
-- logic -> probabilistic guidance (Bayesian best-first + causal graph)
+- logic -> causal Bayes net guidance + SCM-backed factor propagation
 - logic -> backward chaining (goal-directed recursion)
