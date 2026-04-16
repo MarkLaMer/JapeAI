@@ -1,58 +1,69 @@
 """
-cbn/logic_causal.py — CBN / SCM-backed natural-deduction solver.
+cbn/logic_causal.py -- Bayesian Network proof solver.
 
-Accepts the same (assumptions, goal) input as csp/skeleton_csp.py and
-planning/internal_planner.py and returns the proof as a list of action
-strings in exactly the same format as the PDDL planner:
+A genuinely independent third solver alongside CSP (depth-first backtracking)
+and PDDL (breadth-first BFS), using four distinct mechanisms:
 
-    modus-ponens(P, (P -> Q))           → Q
-    and-elim-left((P & Q))              → P
-    and-intro(P, Q)                     → (P & Q)
+  1. D-separation filter
+     Build a CausalGraph from the implications in the assumption set.  Use
+     the Bayes-ball algorithm to identify which formulas in the domain have
+     an active causal path to the goal atoms given the observed assumption
+     atoms.  Formulas that are d-separated (causally irrelevant) are pruned
+     from the search domain before the search begins.
 
-How the CBN / SCM layer is used
---------------------------------
-1.  **CausalGraph** — built from the implications in the assumption set.
-    Each atom is a node; each A → B implication creates directed edge(s)
-    from the atoms of A to the atoms of B.  The topological sort gives the
-    natural proof-step order and guarantees we never attempt a derivation
-    before its premises are available.
+  2. Best-first probabilistic search
+     A priority queue scored by cumulative Naive Bayes step scores.  Always
+     expands the most promising proof state next.
+       CSP  -- depth-first backtracking + iterative deepening
+       PDDL -- uniform breadth-first BFS
+       Bayes -- best-first, guided by posterior step-success probability
 
-2.  **D-separation** (relevance filter) — after the proof is found we use
-    d-separation on the causal graph to decide which steps are on an active
-    causal path from the given assumptions to the goal.  Irrelevant steps
-    (premises whose causal influence is blocked) are silently dropped.
+  3. Full FOL rule set
+     Forward rules (each costs one search expansion):
+       forall-elim, exists-intro, or-intro, MP, and-intro, and-elim
+     Structural goal-decomposition rules (free -- handled recursively):
+       imp-intro, forall-intro, exists-elim, or-elim
 
-3.  **SCM structural equations** — each atom V is given a binary SCM
-    variable whose structural equation encodes whether V is derivable:
-        • root assumption   →  eq(∅, U) = 1  (noise fixed to 1)
-        • derived via A→V   →  eq({A:v}, U) = v["A"] if rule fires else U
-    Forward sampling of the SCM (SCM.sample) *is* the proof evaluation.
-    We shadow the standard sample loop with a traced version that records
-    which rule fired at each node — these become the proof step strings.
-
-4.  **Abduction** — if the goal is still unproved after one forward pass
-    (can happen with compound antecedents), the abduction step identifies
-    which noise assignments are needed and triggers a second-pass in which
-    those atoms are set to 1.  This handles the case where a conjunction
-    in an antecedent requires both halves to be independently derived
-    before modus-ponens can fire.
+  4. Implication Introduction
+     To prove A -> B: assume A, spawn a sub-search for B in the extended
+     context, discharge the hypothesis.  Handles all tautologies and
+     hypothetical reasoning problems.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+import heapq
+from math import log
+from typing import Optional
 
-from parser.ast import Formula, Atom, And, Imp, Not, Or, ForAll, Exists, Var, Predicate
-from cbn.graph import CausalGraph, graph_from_string
-from cbn.scm   import SCM, SCMVariable, NoiseVar
+from parser.ast import (
+    Formula, Atom, And, Imp, Not, Or, ForAll, Exists, Var, Predicate,
+)
+from cbn.graph import CausalGraph
+from bayes.scorer import default_step_scorer, default_formula_scorer
+from bayes.features import extract_step_features, _formula_type
+from csp.fol_csp import (
+    FOLStep, FOLImpIntroStep, FOLForAllIntroStep,
+    FOLExistsElimStep, FOLOrElimStep, FOLProofStep,
+    _generate_forward_steps, _build_domain, _has_contradiction,
+    render_fol_csp_steps,
+)
+from logic.fol_prover import subst, _fresh, reset_fresh, collect_terms
 
 
 # ---------------------------------------------------------------------------
-# Formula helpers
+# Constants
+# ---------------------------------------------------------------------------
+
+_MAX_STATES      = 3000   # max priority-queue expansions per forward search
+_MAX_STRUCT_DEPTH = 12    # max recursive structural-rule nesting
+
+
+# ---------------------------------------------------------------------------
+# Atom helpers
 # ---------------------------------------------------------------------------
 
 def _atom_nodes(formula: Formula) -> set[str]:
-    """Return the string labels of all atomic sub-formulas."""
+    """Return string labels of all atomic sub-formulas."""
     if isinstance(formula, (Atom, Var, Predicate)):
         return {str(formula)}
     if isinstance(formula, Not):
@@ -64,53 +75,27 @@ def _atom_nodes(formula: Formula) -> set[str]:
     return {str(formula)}
 
 
-def _conjuncts(formula: Formula) -> list[Formula]:
-    """Flatten a conjunction into its conjuncts."""
-    if isinstance(formula, And):
-        return _conjuncts(formula.left) + _conjuncts(formula.right)
-    return [formula]
-
-
-def _is_known(formula: Formula, known: set[str]) -> bool:
-    """Check if *formula* is fully satisfied by the set of known-true labels."""
-    if isinstance(formula, And):
-        return _is_known(formula.left, known) and _is_known(formula.right, known)
-    return str(formula) in known
-
-
 # ---------------------------------------------------------------------------
-# CBN graph construction
+# Step 1: Build causal graph from assumptions
 # ---------------------------------------------------------------------------
 
-def _build_graph(
+def _build_causal_graph(
     assumptions: list[Formula],
     goal: Formula,
-) -> tuple[CausalGraph, dict[str, Formula]]:
+) -> tuple[CausalGraph, set[str]]:
     """
-    Build a CausalGraph from the assumptions and goal.
+    Build a CausalGraph from the implications in *assumptions*.
 
-    Nodes  : all unique atomic sub-formulas (labelled by str()).
-    Edges  : for each Imp(A, B) in assumptions, edges from every atom of A
-             to every atom of B that is not already an atom of A.
+    Nodes  : all atomic sub-formulas appearing in assumptions + goal.
+    Edges  : for each Imp(A, B) in assumptions, directed edges from every
+             atom of A to every atom of B (excluding self-loops).
 
-    Returns (graph, label → Formula mapping).
+    Returns (graph, all_atom_labels).
     """
-    # Collect all atom labels
-    label_map: dict[str, Formula] = {}
+    all_labels: set[str] = set()
     for f in list(assumptions) + [goal]:
-        for lbl in _atom_nodes(f):
-            if lbl not in label_map:
-                # Try to recover the actual Formula object
-                label_map[lbl] = Atom(lbl)   # fallback; real object not needed for graph
+        all_labels.update(_atom_nodes(f))
 
-    # Mark the actual Formula objects where we have them
-    for f in assumptions:
-        if isinstance(f, (Atom, Var, Predicate)):
-            label_map[str(f)] = f
-    if isinstance(goal, (Atom, Var, Predicate)):
-        label_map[str(goal)] = goal
-
-    # Build directed edges from implications
     edges: list[tuple[str, str]] = []
     for f in assumptions:
         if isinstance(f, Imp):
@@ -121,292 +106,216 @@ def _build_graph(
                     if a != c:
                         edges.append((a, c))
 
-    # Deduplicate
-    edges = list(dict.fromkeys(edges))
+    edges = list(dict.fromkeys(edges))   # deduplicate, preserve order
 
-    # Build graph, dropping any edge that would create a cycle
-    nodes = set(label_map.keys())
+    # Drop any edge that would create a cycle
     safe: list[tuple[str, str]] = []
     for edge in edges:
         try:
-            CausalGraph(nodes, safe + [edge])
+            CausalGraph(all_labels, safe + [edge])
             safe.append(edge)
         except ValueError:
-            pass  # skip cycle-creating edge
+            pass
 
-    return CausalGraph(nodes, safe), label_map
+    return CausalGraph(all_labels, safe), all_labels
 
 
 # ---------------------------------------------------------------------------
-# SCM construction
+# Step 2: D-separation filter
 # ---------------------------------------------------------------------------
 
-def _build_scm(
-    assumptions: list[Formula],
+def _dsep_filter(
+    domain: set[Formula],
     graph: CausalGraph,
-    label_map: dict[str, Formula],
-) -> SCM:
+    assumption_atoms: set[str],
+    goal_atoms: set[str],
+) -> set[Formula]:
     """
-    Build an SCM over the causal graph.
+    Prune *domain* to formulas with at least one atom d-connected to any
+    goal atom given the observed assumption atoms.
 
-    Structural equations
-    --------------------
-    • Root assumptions (atoms given as facts) :
-          eq(∅, U) = U         with U ~ PointMass(1)   → always True
-    • Derivable atoms (consequents of implications) :
-          eq({parents}, U) = 1 if any supporting antecedent set is fully 1
-                              else U
-          with U ~ PointMass(0)   → False unless derived
-    • Other atoms (not mentioned in any implication consequent) :
-          eq(∅, U) = U         with U ~ PointMass(0)   → always False
+    A formula is considered relevant if it lies on an active causal path
+    from the assumptions to the goal.  D-separated (causally blocked)
+    formulas are removed -- they cannot contribute to the proof.
     """
-    given_labels: set[str] = set()
-    for f in assumptions:
-        if isinstance(f, (Atom, Var, Predicate)):
-            given_labels.add(str(f))
+    if not graph.nodes or not goal_atoms:
+        return domain
 
-    # For each node, collect the implications that can derive it
-    # implication_rules[node_label] = list of (antecedent_labels_set, imp_formula)
-    implication_rules: dict[str, list[tuple[frozenset[str], Formula]]] = {
-        n: [] for n in graph.nodes
-    }
-    for f in assumptions:
-        if isinstance(f, Imp):
-            ant_labels = frozenset(_atom_nodes(f.left))
-            for c_lbl in _atom_nodes(f.right):
-                if c_lbl in implication_rules:
-                    implication_rules[c_lbl].append((ant_labels, f))
+    observed = assumption_atoms & graph.nodes
+    goal_nodes = goal_atoms & graph.nodes
 
-    variables: dict[str, SCMVariable] = {}
-    for node in graph.nodes:
-        parents_list = sorted(graph.parents(node))
+    kept: set[Formula] = set()
+    for f in domain:
+        f_atoms = _atom_nodes(f) & graph.nodes
+        if not f_atoms:
+            kept.add(f)   # no graph nodes -- keep (cannot evaluate)
+            continue
 
-        if node in given_labels:
-            # Root: always True
-            def _make_root_eq():
-                def eq(pa: dict, u: int) -> int: return u
-                return eq
-            var = SCMVariable(
-                name=node,
-                parents=parents_list,
-                equation=_make_root_eq(),
-                noise=NoiseVar(f"U_{node}", [1], [1.0]),
-                domain=[0, 1],
-            )
-        elif implication_rules[node]:
-            # Derived: True if any rule's antecedent is fully satisfied
-            rules = implication_rules[node]
+        # Keep if any atom of f is d-connected to any goal atom
+        relevant = any(
+            not graph.d_separated(a, g, observed)
+            for a in f_atoms
+            for g in goal_nodes
+            if a != g
+        )
+        if relevant or (f_atoms & goal_nodes):
+            kept.add(f)
 
-            def _make_derived_eq(rule_list):
-                def eq(pa: dict, u: int) -> int:
-                    for ant_set, _ in rule_list:
-                        if all(pa.get(a, 0) == 1 for a in ant_set):
-                            return 1
-                    return u   # noise fallback (0 by default)
-                return eq
-
-            var = SCMVariable(
-                name=node,
-                parents=parents_list,
-                equation=_make_derived_eq(rules),
-                noise=NoiseVar(f"U_{node}", [0], [1.0]),
-                domain=[0, 1],
-            )
-        else:
-            # Unknown atom: always False
-            def _make_false_eq():
-                def eq(pa: dict, u: int) -> int: return u
-                return eq
-            var = SCMVariable(
-                name=node,
-                parents=parents_list,
-                equation=_make_false_eq(),
-                noise=NoiseVar(f"U_{node}", [0], [1.0]),
-                domain=[0, 1],
-            )
-
-        variables[node] = var
-
-    return SCM(graph, variables)
+    # Always keep assumptions and goal themselves
+    kept.update(domain & set())   # no-op, just for clarity
+    return kept if kept else domain   # never return empty domain
 
 
 # ---------------------------------------------------------------------------
-# Traced forward evaluation  (this IS the SCM sample + trace)
+# Step 3: Best-first forward search (Bayesian priority queue)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _ProofStep:
-    conclusion: Formula       # derived formula
-    rule: str                 # "modus-ponens" | "and-elim-left" | ...
-    supports: list[Formula]   # premises used
-
-
-def _forward_trace(
-    assumptions: list[Formula],
+def _best_first_search(
+    base: list[Formula],
     goal: Formula,
-    graph: CausalGraph,
-    scm: SCM,
-) -> list[_ProofStep] | None:
+    domain: set[Formula],
+    max_states: int = _MAX_STATES,
+) -> Optional[list[FOLStep]]:
     """
-    Forward-chain from assumptions to goal, recording each inference step.
+    Best-first forward proof search guided by Naive Bayes step scores.
 
-    Uses the SCM's topological order from the CausalGraph for efficient
-    scheduling, then applies the full rule set (MP, ∧E, ∧I) at each pass.
+    Each search state is a frozenset of known formulas plus the sequence
+    of steps that produced it.  The priority queue always expands the state
+    with the highest cumulative Bayesian score (lowest neg-log-score).
 
-    The "abduction" phase: if the goal is not reached in the first pass,
-    we call scm.abduction({goal_label: 1}) to identify which atoms need
-    to be set to 1 and why — this handles cases where the goal requires
-    multiple independent chains whose junction was not yet activated.
+    This differs fundamentally from:
+      CSP  -- which uses DFS with a step budget and backtracks
+      PDDL -- which expands all states at depth d before depth d+1
     """
-    known: set[str] = set()          # labels of currently-true formulas
-    known_formulas: set[Formula] = set(assumptions)   # actual formula objects
+    step_scorer = default_step_scorer()
 
-    # Initialise with atomic assumptions
-    for f in assumptions:
-        known.add(str(f))
-        known_formulas.add(f)
+    initial = frozenset(base)
+    # heap entries: (neg_log_score, tie_counter, known_frozenset, steps)
+    heap: list = [(0.0, 0, initial, [])]
+    visited: set[frozenset[Formula]] = set()
+    counter = 0
 
-    # Evaluate in topological order (CBN layer)
-    topo = graph.topological_sort()
-    steps: list[_ProofStep] = []
+    while heap and counter < max_states:
+        neg_score, _, known, steps = heapq.heappop(heap)
 
-    changed = True
-    max_rounds = len(topo) + 4
-    for _round in range(max_rounds):
-        if not changed:
-            break
-        changed = False
+        if known in visited:
+            continue
+        visited.add(known)
+        counter += 1
 
-        # ── And-Elimination ────────────────────────────────────────────────
-        for f in list(known_formulas):
-            if isinstance(f, And):
-                for sub, rule in [(f.left, "and-elim-left"), (f.right, "and-elim-right")]:
-                    if str(sub) not in known:
-                        known.add(str(sub))
-                        known_formulas.add(sub)
-                        steps.append(_ProofStep(sub, rule, [f]))
-                        changed = True
+        if goal in known:
+            return steps
 
-        # ── Modus Ponens — evaluated in topological order ──────────────────
-        for node_lbl in topo:
-            if node_lbl in known:
+        candidates = _generate_forward_steps(known, domain)
+
+        for fstep in candidates:
+            if fstep.formula in known:
                 continue
-            # Check each implication whose consequent includes this node
-            for f in assumptions:
-                if not isinstance(f, Imp):
-                    continue
-                if node_lbl not in _atom_nodes(f.right):
-                    continue
-                antecedent = f.left
-                consequent = f.right
-                if _is_known(antecedent, known) and str(consequent) not in known:
-                    known.add(str(consequent))
-                    known_formulas.add(consequent)
-                    ant_parts = _conjuncts(antecedent)
-                    steps.append(_ProofStep(consequent, "modus-ponens", ant_parts + [f]))
-                    changed = True
 
-        # ── And-Introduction (for conjunction goals / antecedents) ─────────
-        targets: set[Formula] = set()
-        if isinstance(goal, And):
-            targets.add(goal)
-        for f in assumptions:
-            if isinstance(f, Imp) and isinstance(f.left, And):
-                targets.add(f.left)
+            new_known = known | {fstep.formula}
+            if new_known in visited:
+                continue
 
-        for target in targets:
-            if isinstance(target, And):
-                left_ok  = _is_known(target.left,  known)
-                right_ok = _is_known(target.right, known)
-                if left_ok and right_ok and str(target) not in known:
-                    known.add(str(target))
-                    known_formulas.add(target)
-                    l_parts = _conjuncts(target.left)
-                    r_parts = _conjuncts(target.right)
-                    supports = l_parts + r_parts
-                    steps.append(_ProofStep(target, "and-intro", supports))
-                    changed = True
+            # Score this step with the Naive Bayes model
+            feats = extract_step_features(
+                fstep,
+                goal=goal,
+                available_count=len(known),
+                depth=len(steps),
+            )
+            p_success = step_scorer.score(feats, "success")
+            new_neg_score = neg_score - log(max(p_success, 1e-9))
 
-        if _is_known(goal, known):
-            break
+            new_steps = steps + [fstep]
+            heapq.heappush(heap, (new_neg_score, id(new_steps), new_known, new_steps))
 
-    if not _is_known(goal, known):
-        # ── Abduction pass: use SCM.abduction to identify missing atoms ────
-        goal_label = str(goal)
-        if goal_label in scm.graph.nodes:
-            consistent = scm.abduction({goal_label: 1})
-            if consistent:
-                # Find the noise assignment that sets the most atoms to 1
-                noise, _ = consistent[0]
-                extra: dict[str, int] = {
-                    k: v for k, v in noise.items()
-                    if v == 1 and k not in known
-                }
-                # Re-run with these extra atoms activated
-                for lbl in extra:
-                    if lbl not in known:
-                        known.add(lbl)
-                        known_formulas.add(Atom(lbl))
-
-                # One more forward pass
-                for f in assumptions:
-                    if isinstance(f, Imp):
-                        if _is_known(f.left, known) and str(f.right) not in known:
-                            known.add(str(f.right))
-                            known_formulas.add(f.right)
-                            ant_parts = _conjuncts(f.left)
-                            steps.append(_ProofStep(f.right, "modus-ponens",
-                                                    ant_parts + [f]))
-
-        if not _is_known(goal, known):
-            return None
-
-    # ── Backward trim: keep only steps on a path to the goal ──────────────
-    needed: set[str] = {str(goal)}
-    for step in reversed(steps):
-        if str(step.conclusion) in needed:
-            for sup in step.supports:
-                needed.add(str(sup))
-
-    trimmed = [
-        s for s in steps
-        if str(s.conclusion) in needed and str(s.conclusion) not in {str(a) for a in assumptions}
-    ]
-
-    return trimmed
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Action string renderer  (PDDL-planner-compatible format)
+# Step 4: Structural goal decomposition + best-first search
 # ---------------------------------------------------------------------------
 
-def _render_step(step: _ProofStep) -> str:
+def _solve(
+    base: list[Formula],
+    goal: Formula,
+    domain: set[Formula],
+    struct_depth: int = 0,
+) -> Optional[list[FOLProofStep]]:
     """
-    Format a proof step as an action string.
+    Prove *goal* from *base*.
 
-    Examples:
-        modus-ponens(P, (P -> Q))
-        and-elim-left((P & Q))
-        and-intro(P, Q)
+    Strategy:
+      1. Fast checks (goal in context, contradiction).
+      2. Structural decomposition of the goal shape
+         (ForAll-intro, Imp-intro, Exists-elim, Or-elim).
+      3. Best-first forward search for flat goals.
     """
-    if step.rule == "modus-ponens":
-        # Convention: show antecedent atoms + the implication
-        supports_str = ", ".join(str(s) for s in step.supports)
-        return f"modus-ponens({supports_str})"
+    if struct_depth > _MAX_STRUCT_DEPTH:
+        return None
 
-    if step.rule == "and-elim-left":
-        return f"and-elim-left({step.supports[0]})"
+    available = set(base)
 
-    if step.rule == "and-elim-right":
-        return f"and-elim-right({step.supports[0]})"
+    # -- Fast path: goal already known ----------------------------------------
+    if goal in available:
+        return []
 
-    if step.rule == "and-intro":
-        supports_str = ", ".join(str(s) for s in step.supports)
-        return f"and-intro({supports_str})"
+    # -- Contradiction -> ex falso --------------------------------------------
+    if _has_contradiction(available):
+        return [FOLStep(formula=goal, rule="ex_falso")]
 
-    # Fallback
-    supports_str = ", ".join(str(s) for s in step.supports)
-    return f"{step.rule}({supports_str})"
+    # -- ForAll-intro ---------------------------------------------------------
+    if isinstance(goal, ForAll):
+        c = _fresh()
+        subgoal = subst(goal.body, goal.var, c)
+        sub = _solve(base, subgoal, domain, struct_depth + 1)
+        if sub is not None:
+            return [FOLForAllIntroStep(
+                formula=goal, var=goal.var,
+                const_name=c.name, sub_steps=tuple(sub),
+            )]
+        return None
+
+    # -- Imp-intro ------------------------------------------------------------
+    if isinstance(goal, Imp):
+        augmented = list(available) + [goal.left]
+        sub = _solve(augmented, goal.right, domain, struct_depth + 1)
+        if sub is not None:
+            return [FOLImpIntroStep(
+                formula=goal, antecedent=goal.left, sub_steps=tuple(sub),
+            )]
+        # Fall through: maybe goal is already derivable as a fact via MP
+
+    # -- Exists-elim: eliminate any Exists in context -------------------------
+    for f in list(available):
+        if not isinstance(f, Exists):
+            continue
+        c = _fresh()
+        instance = subst(f.body, f.var, c)
+        augmented = [x for x in base if x is not f] + [instance]
+        sub = _solve(augmented, goal, domain, struct_depth + 1)
+        if sub is not None:
+            return [FOLExistsElimStep(
+                formula=goal, elim_formula=f,
+                const_name=c.name, sub_steps=tuple(sub),
+            )]
+
+    # -- Or-elim: case-split on any disjunction in context --------------------
+    for f in list(available):
+        if not isinstance(f, Or):
+            continue
+        left_base  = [x for x in base if x is not f] + [f.left]
+        right_base = [x for x in base if x is not f] + [f.right]
+        left_sub  = _solve(left_base,  goal, domain, struct_depth + 1)
+        right_sub = _solve(right_base, goal, domain, struct_depth + 1)
+        if left_sub is not None and right_sub is not None:
+            return [FOLOrElimStep(
+                formula=goal, or_formula=f,
+                left_steps=tuple(left_sub), right_steps=tuple(right_sub),
+            )]
+
+    # -- Best-first forward search --------------------------------------------
+    return _best_first_search(base, goal, domain)
 
 
 # ---------------------------------------------------------------------------
@@ -416,49 +325,57 @@ def _render_step(step: _ProofStep) -> str:
 def solve_logic_causal(
     assumptions: list[Formula],
     goal: Formula,
-) -> list[str] | None:
+) -> Optional[list[FOLProofStep]]:
     """
-    CBN / SCM-backed forward-chaining proof.
+    Bayesian Network proof solver.
 
     Parameters
     ----------
-    assumptions : list of parsed Formula objects (same as CSP / PDDL solvers)
-    goal        : the target Formula
+    assumptions : parsed Formula objects
+    goal        : target Formula
 
     Returns
     -------
-    list[str]   — action strings in PDDL-planner format, e.g.
-                  ["modus-ponens(P, (P -> Q))", "modus-ponens(Q, (Q -> R))"]
-    None        — if the goal is not provable from the assumptions
+    list[FOLProofStep]  -- proof steps (compatible with render_logic_causal_steps)
+    None                -- if the goal is not provable from the assumptions
     """
-    if not assumptions:
-        # No assumptions: goal is provable only if it is a tautology
-        # (e.g. P -> P).  Delegate to a simple check.
-        if _is_known(goal, set()):
-            return []
-        return None
+    reset_fresh()
 
-    try:
-        graph, label_map = _build_graph(assumptions, goal)
-        scm = _build_scm(assumptions, graph, label_map)
-    except Exception:
-        # Fallback: build a trivial single-node graph so _forward_trace still works
-        graph = CausalGraph({"__dummy__"}, [])
-        scm   = SCM(graph, {"__dummy__": SCMVariable(
-            "__dummy__", [], lambda pa, u: u,
-            NoiseVar("U", [0], [1.0]), [0, 1])})
+    # Build the formula domain (all sub-formulas of assumptions + goal)
+    domain = _build_domain(assumptions, goal)
 
-    steps = _forward_trace(assumptions, goal, graph, scm)
-    if steps is None:
-        return None
+    # Step 1: Build causal graph
+    if assumptions:
+        try:
+            graph, all_atoms = _build_causal_graph(assumptions, goal)
+        except Exception:
+            graph = CausalGraph(set(), [])
+            all_atoms = set()
+    else:
+        graph = CausalGraph(set(), [])
+        all_atoms = set()
 
-    return [_render_step(s) for s in steps]
+    # Step 2: D-separation filter -- prune causally irrelevant formulas
+    if graph.nodes:
+        assumption_atoms: set[str] = set()
+        for f in assumptions:
+            if isinstance(f, (Atom, Var, Predicate)):
+                assumption_atoms.update(_atom_nodes(f))
+        goal_atoms = _atom_nodes(goal)
+        domain = _dsep_filter(domain, graph, assumption_atoms, goal_atoms)
+
+    # Steps 3+4: Structural decomposition + best-first Bayesian search
+    return _solve(list(assumptions), goal, domain)
 
 
-def render_logic_causal_steps(actions: list[str], lines: list) -> None:
+def render_logic_causal_steps(
+    steps: list[FOLProofStep],
+    lines: list,
+    depth: int = 0,
+) -> None:
     """
-    Convert a list of action strings to (depth, text, rule, note) tuples
-    ready for the proof pane.  Same format as render_plan().
+    Flatten Bayes solver proof steps into (depth, formula_str, rule_label, note)
+    tuples for the proof pane.  Delegates to render_fol_csp_steps since both
+    solvers now share the same FOLProofStep types.
     """
-    for action in actions:
-        lines.append((0, action, "action", None))
+    render_fol_csp_steps(steps, lines, depth)
