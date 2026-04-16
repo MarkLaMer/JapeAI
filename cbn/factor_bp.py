@@ -181,6 +181,76 @@ def _propagate(
                 steps.append(FOLStep(formula=part, rule=rule, support1=formula))
                 changed = True
 
+        # Deterministic decompositions of negated compounds.
+        for formula in sorted(known, key=str):
+            if not isinstance(formula, Not):
+                continue
+
+            child = formula.child
+
+            if isinstance(child, Not):
+                derived = child.child
+                if derived not in known:
+                    known.add(derived)
+                    steps.append(FOLStep(
+                        formula=derived,
+                        rule="double_neg_elim",
+                        support1=formula,
+                    ))
+                    changed = True
+
+            elif isinstance(child, Or):
+                for derived, rule in (
+                    (Not(child.left), "neg_or_elim_l"),
+                    (Not(child.right), "neg_or_elim_r"),
+                ):
+                    if derived in known:
+                        continue
+                    known.add(derived)
+                    steps.append(FOLStep(
+                        formula=derived,
+                        rule=rule,
+                        support1=formula,
+                    ))
+                    changed = True
+
+            elif isinstance(child, Imp):
+                for derived, rule in (
+                    (child.left, "neg_imp_elim_l"),
+                    (Not(child.right), "neg_imp_elim_r"),
+                ):
+                    if derived in known:
+                        continue
+                    known.add(derived)
+                    steps.append(FOLStep(
+                        formula=derived,
+                        rule=rule,
+                        support1=formula,
+                    ))
+                    changed = True
+
+            elif isinstance(child, Exists):
+                derived = ForAll(child.var, Not(child.body))
+                if derived not in known:
+                    known.add(derived)
+                    steps.append(FOLStep(
+                        formula=derived,
+                        rule="neg_exists_elim",
+                        support1=formula,
+                    ))
+                    changed = True
+
+            elif isinstance(child, ForAll):
+                derived = Exists(child.var, Not(child.body))
+                if derived not in known:
+                    known.add(derived)
+                    steps.append(FOLStep(
+                        formula=derived,
+                        rule="neg_forall_elim",
+                        support1=formula,
+                    ))
+                    changed = True
+
         # ∀-elim in causal/topological order over instantiated bodies.
         universals = sorted(
             (formula for formula in known if isinstance(formula, ForAll)),
