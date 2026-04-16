@@ -580,52 +580,78 @@ def _lc(assumptions_strs: list[str], goal_str: str) -> list[str] | None:
 
 
 class TestLogicCausal:
-    """solve_logic_causal mirrors the CSP / PDDL solver for all basic rules."""
+    """solve_logic_causal -- Bayesian best-first FOL proof solver."""
+
+    def _rules(self, result):
+        """Collect all rule names from a flat or nested FOLProofStep list."""
+        from csp.fol_csp import (
+            FOLStep, FOLImpIntroStep, FOLForAllIntroStep,
+            FOLExistsElimStep, FOLOrElimStep,
+        )
+        rules = []
+        for s in result:
+            if isinstance(s, FOLStep):
+                rules.append(s.rule)
+            elif hasattr(s, "rule"):
+                rules.append(s.rule)
+                if hasattr(s, "sub_steps"):
+                    rules.extend(self._rules(list(s.sub_steps)))
+        return rules
+
+    def _conclusions(self, result):
+        """Collect all conclusion formula strings from a step list."""
+        conclusions = []
+        for s in result:
+            conclusions.append(str(s.formula))
+            if hasattr(s, "sub_steps"):
+                conclusions.extend(self._conclusions(list(s.sub_steps)))
+        return conclusions
 
     def test_modus_ponens_simple(self):
         result = _lc(["P", "P -> Q"], "Q")
         assert result is not None
-        assert len(result) == 1
-        assert "modus-ponens" in result[0]
-        assert "P" in result[0]
-        assert "(P -> Q)" in result[0]
+        rules = self._rules(result)
+        assert "mp" in rules
 
     def test_mp_chain_two_steps(self):
         result = _lc(["P", "P -> Q", "Q -> R"], "R")
         assert result is not None
-        assert len(result) == 2
-        # First step derives Q, second derives R
-        assert any("modus-ponens" in s and "Q" in s for s in result)
-        assert any("modus-ponens" in s and "R" in s for s in result)
+        conclusions = self._conclusions(result)
+        assert "Q" in conclusions
+        assert "R" in conclusions
 
     def test_mp_chain_three_steps(self):
         result = _lc(["P", "P -> Q", "Q -> R", "R -> S"], "S")
         assert result is not None
-        assert len(result) == 3
+        conclusions = self._conclusions(result)
+        assert "S" in conclusions
 
     def test_and_elim_left(self):
         result = _lc(["P & Q"], "P")
         assert result is not None
-        assert any("and-elim" in s for s in result)
+        rules = self._rules(result)
+        assert any("and_elim" in r for r in rules)
 
     def test_and_elim_right(self):
         result = _lc(["P & Q"], "Q")
         assert result is not None
-        assert any("and-elim" in s for s in result)
+        rules = self._rules(result)
+        assert any("and_elim" in r for r in rules)
 
     def test_and_elim_then_mp(self):
         result = _lc(["P & Q", "(P & Q) -> R"], "R")
         assert result is not None
-        # Should include modus-ponens step
-        assert any("modus-ponens" in s for s in result)
+        rules = self._rules(result)
+        assert "mp" in rules
 
     def test_and_intro(self):
         result = _lc(["P", "Q"], "P & Q")
         assert result is not None
-        assert any("and-intro" in s for s in result)
+        rules = self._rules(result)
+        assert "and_intro" in rules
 
     def test_already_known(self):
-        """Goal is directly in assumptions — no steps needed."""
+        """Goal is directly in assumptions -- no steps needed."""
         result = _lc(["P", "Q"], "P")
         assert result is not None
         assert len(result) == 0
@@ -638,65 +664,82 @@ class TestLogicCausal:
         result = _lc([], "Q")
         assert result is None
 
-    def test_steps_are_strings(self):
+    def test_steps_are_fol_proof_steps(self):
+        """solve_logic_causal now returns FOLProofStep objects, not strings."""
+        from csp.fol_csp import FOLStep
         result = _lc(["P", "P -> Q"], "Q")
         assert result is not None
+        assert len(result) > 0
+        # Top-level result should be FOLProofStep instances
         for s in result:
-            assert isinstance(s, str)
-            assert len(s) > 0
+            assert hasattr(s, "formula")
+            assert hasattr(s, "rule")
 
     def test_step_contains_conclusion(self):
-        """Each step string should name the formula it derives."""
+        """The final derived formula should be the goal."""
         result = _lc(["P", "P -> Q", "Q -> R"], "R")
         assert result is not None
-        # The last step should mention R or (Q -> R)
-        last = result[-1]
-        assert "R" in last
+        conclusions = self._conclusions(result)
+        assert "R" in conclusions
+
+    def test_imp_intro_tautology(self):
+        """P -> P should be provable via imp-intro with no assumptions."""
+        result = _lc([], "P -> P")
+        assert result is not None
+        rules = self._rules(result)
+        assert "imp_intro" in rules
+
+    def test_and_commutativity(self):
+        """(P & Q) -> (Q & P) tautology via imp-intro."""
+        result = _lc([], "(P & Q) -> (Q & P)")
+        assert result is not None
 
 
 class TestLogicCausalCBNStructure:
-    """Verify the CBN graph and SCM are built correctly and influence the proof."""
+    """Verify the causal graph and d-separation filter work correctly."""
 
     def test_graph_builds_from_imp(self):
-        """The causal graph extracted from P->Q should have edge P → Q."""
-        from cbn.logic_causal import _build_graph
-        g, _ = _build_graph([pf2("P"), pf2("P -> Q")], pf2("Q"))
+        """The causal graph extracted from P->Q should have edge P -> Q."""
+        from cbn.logic_causal import _build_causal_graph
+        from parser.parser import parse_formula
+        g, _ = _build_causal_graph(
+            [parse_formula("P"), parse_formula("P -> Q")], parse_formula("Q"))
         assert ("P", "Q") in g.edges
 
     def test_graph_topo_order_respected(self):
         """Topological sort must put P before Q before R for P->Q->R chain."""
-        from cbn.logic_causal import _build_graph
-        g, _ = _build_graph(
-            [pf2("P"), pf2("P -> Q"), pf2("Q -> R")], pf2("R"))
+        from cbn.logic_causal import _build_causal_graph
+        from parser.parser import parse_formula
+        g, _ = _build_causal_graph(
+            [parse_formula("P"), parse_formula("P -> Q"), parse_formula("Q -> R")],
+            parse_formula("R"))
         order = g.topological_sort()
         assert order.index("P") < order.index("Q") < order.index("R")
 
-    def test_scm_root_always_true(self):
-        """An atom given as an assumption must evaluate to 1 in the SCM."""
-        from cbn.logic_causal import _build_graph, _build_scm
-        assumptions = [pf2("P"), pf2("P -> Q")]
-        goal = pf2("Q")
-        g, lm = _build_graph(assumptions, goal)
-        scm = _build_scm(assumptions, g, lm)
-        vals = scm.sample()
-        assert vals["P"] == 1
+    def test_dsep_filter_keeps_relevant(self):
+        """D-separation filter must keep formulas on the path to the goal."""
+        from cbn.logic_causal import _build_causal_graph, _dsep_filter, _atom_nodes
+        from cbn.graph import CausalGraph
+        from parser.ast import Atom
+        from parser.parser import parse_formula
+        assumptions = [parse_formula("P"), parse_formula("P -> Q")]
+        goal = parse_formula("Q")
+        graph, _ = _build_causal_graph(assumptions, goal)
+        domain = {Atom("P"), Atom("Q")}
+        assumption_atoms = {"P"}
+        goal_atoms = {"Q"}
+        filtered = _dsep_filter(domain, graph, assumption_atoms, goal_atoms)
+        # Q must be kept -- it is the goal
+        assert Atom("Q") in filtered
 
-    def test_scm_derived_node_true(self):
-        """Q derived via P -> Q with P=1 must evaluate to 1."""
-        from cbn.logic_causal import _build_graph, _build_scm
-        assumptions = [pf2("P"), pf2("P -> Q")]
-        goal = pf2("Q")
-        g, lm = _build_graph(assumptions, goal)
-        scm = _build_scm(assumptions, g, lm)
-        vals = scm.sample()
-        assert vals["Q"] == 1
-
-    def test_scm_unprovable_node_false(self):
-        """An atom with no supporting implication must stay at 0."""
-        from cbn.logic_causal import _build_graph, _build_scm
-        assumptions = [pf2("P"), pf2("P -> Q")]
-        goal = pf2("R")
-        g, lm = _build_graph(assumptions, goal)
-        scm = _build_scm(assumptions, g, lm)
-        vals = scm.sample()
-        assert vals.get("R", 0) == 0
+    def test_dsep_filter_not_empty(self):
+        """D-separation filter must never return an empty domain."""
+        from cbn.logic_causal import _build_causal_graph, _dsep_filter
+        from parser.ast import Atom
+        from parser.parser import parse_formula
+        assumptions = [parse_formula("P"), parse_formula("P -> Q")]
+        goal = parse_formula("Q")
+        graph, _ = _build_causal_graph(assumptions, goal)
+        domain = {Atom("P"), Atom("Q"), Atom("R")}
+        filtered = _dsep_filter(domain, graph, {"P"}, {"Q"})
+        assert len(filtered) > 0

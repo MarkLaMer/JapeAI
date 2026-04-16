@@ -43,8 +43,9 @@ from bayes.scorer import default_step_scorer, default_formula_scorer
 from bayes.features import extract_step_features, _formula_type
 from csp.fol_csp import (
     FOLStep, FOLImpIntroStep, FOLForAllIntroStep,
-    FOLExistsElimStep, FOLOrElimStep, FOLProofStep,
+    FOLExistsElimStep, FOLOrElimStep, FOLNotIntroStep, FOLRAAStep, FOLProofStep,
     _generate_forward_steps, _build_domain, _has_contradiction,
+    _fol_solve_contra,
     render_fol_csp_steps,
 )
 from logic.fol_prover import subst, _fresh, reset_fresh, collect_terms
@@ -56,6 +57,7 @@ from logic.fol_prover import subst, _fresh, reset_fresh, collect_terms
 
 _MAX_STATES      = 3000   # max priority-queue expansions per forward search
 _MAX_STRUCT_DEPTH = 12    # max recursive structural-rule nesting
+_MAX_CONTRA_STEPS = 15    # step budget for contradiction search (RAA / not-intro)
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +249,11 @@ def _solve(
 
     Strategy:
       1. Fast checks (goal in context, contradiction).
-      2. Structural decomposition of the goal shape
-         (ForAll-intro, Imp-intro, Exists-elim, Or-elim).
-      3. Best-first forward search for flat goals.
+      2. Structural decomposition of the goal shape -- mirrors the CSP solver
+         so the Bayes solver handles the same problem classes.
+      3. Structural rules on the context (Exists-elim, Or-elim).
+      4. Best-first forward search for flat goals.
+      5. RAA classical fallback.
     """
     if struct_depth > _MAX_STRUCT_DEPTH:
         return None
@@ -265,10 +269,11 @@ def _solve(
         return [FOLStep(formula=goal, rule="ex_falso")]
 
     # -- ForAll-intro ---------------------------------------------------------
+    # Add fresh constant to base so collect_terms can find it for forall_elim
     if isinstance(goal, ForAll):
         c = _fresh()
         subgoal = subst(goal.body, goal.var, c)
-        sub = _solve(base, subgoal, domain, struct_depth + 1)
+        sub = _solve(base + [c], subgoal, domain, struct_depth + 1)
         if sub is not None:
             return [FOLForAllIntroStep(
                 formula=goal, var=goal.var,
@@ -284,7 +289,55 @@ def _solve(
             return [FOLImpIntroStep(
                 formula=goal, antecedent=goal.left, sub_steps=tuple(sub),
             )]
-        # Fall through: maybe goal is already derivable as a fact via MP
+        # Fall through: goal may be derivable as a fact via MP
+
+    # -- Not-intro: assume A, derive contradiction ----------------------------
+    if isinstance(goal, Not):
+        augmented = list(available) + [goal.child]
+        contra = _fol_solve_contra(
+            augmented, _MAX_CONTRA_STEPS, struct_depth + 1, frozenset(), domain,
+        )
+        if contra is not None:
+            return [FOLNotIntroStep(
+                formula=goal, assumed=goal.child, contra_steps=tuple(contra),
+            )]
+
+    # -- And-intro: prove both conjuncts separately ---------------------------
+    if isinstance(goal, And):
+        l_sub = _solve(base, goal.left,  domain, struct_depth + 1)
+        if l_sub is not None:
+            r_sub = _solve(base, goal.right, domain, struct_depth + 1)
+            if r_sub is not None:
+                return l_sub + r_sub + [FOLStep(
+                    formula=goal, rule="and_intro",
+                    support1=goal.left, support2=goal.right,
+                )]
+
+    # -- Or-intro: try each disjunct -----------------------------------------
+    if isinstance(goal, Or):
+        sub = _solve(base, goal.left, domain, struct_depth + 1)
+        if sub is not None:
+            return sub + [FOLStep(formula=goal, rule="or_intro_l", support1=goal.left)]
+        sub = _solve(base, goal.right, domain, struct_depth + 1)
+        if sub is not None:
+            return sub + [FOLStep(formula=goal, rule="or_intro_r", support1=goal.right)]
+
+    # -- Exists-intro: try each available term as a witness -------------------
+    if isinstance(goal, Exists):
+        terms = collect_terms(available)
+        for term in terms:
+            subgoal = subst(goal.body, goal.var, term)
+            if subgoal in available:
+                return [FOLStep(
+                    formula=goal, rule="exists_intro",
+                    support1=subgoal, note=f"{goal.var}|{term}",
+                )]
+            sub = _solve(base, subgoal, domain, struct_depth + 1)
+            if sub is not None:
+                return sub + [FOLStep(
+                    formula=goal, rule="exists_intro",
+                    support1=subgoal, note=f"{goal.var}|{term}",
+                )]
 
     # -- Exists-elim: eliminate any Exists in context -------------------------
     for f in list(available):
@@ -315,7 +368,24 @@ def _solve(
             )]
 
     # -- Best-first forward search --------------------------------------------
-    return _best_first_search(base, goal, domain)
+    fwd = _best_first_search(base, goal, domain)
+    if fwd is not None:
+        return fwd
+
+    # -- RAA: classical fallback (assume ~goal, derive contradiction) ---------
+    if not isinstance(goal, Not):
+        neg = Not(goal)
+        if neg not in available:
+            contra = _fol_solve_contra(
+                list(available) + [neg],
+                _MAX_CONTRA_STEPS, struct_depth + 1, frozenset(), domain,
+            )
+            if contra is not None:
+                return [FOLRAAStep(
+                    formula=goal, neg_assumed=neg, contra_steps=tuple(contra),
+                )]
+
+    return None
 
 
 # ---------------------------------------------------------------------------
