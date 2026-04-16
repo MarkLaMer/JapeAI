@@ -67,11 +67,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-tkinter is bundled with Python on Windows and macOS. On Linux install it separately:
+tkinter is bundled with Python on Windows. 
+On macOS with Homebrew, install it separately:
 ```bash
-sudo apt install python3-tk
+  brew install python-tk
 ```
-
+On Linux:
+```bash
+  sudo apt install python3-tk
+```
 ---
 
 ## Running the GUI
@@ -366,4 +370,3 @@ Explore and compare four AI paradigms applied to the same logical reasoning task
 - logic -> constraint satisfaction (iterative deepening DFS)
 - logic -> classical planning (BFS)
 - logic -> causal Bayes net guidance + SCM-backed factor propagation
-- logic -> backward chaining (goal-directed recursion)
