@@ -300,3 +300,34 @@ JapeAI currently trusts its own output. A separate proof-checking pass that inde
 JapeAI demonstrates that a compact Python implementation using standard search algorithms can automatically produce natural deduction proofs that closely match the output of a dedicated proof assistant like Jape. Three independent solvers -- iterative-deepening CSP, breadth-first PDDL planning, and Bayesian best-first search with causal graph pruning -- each find correct proofs for all test problems using fundamentally different algorithms. The CSP solver's hybrid structural-decomposition and forward-search design produces output that matches Jape's proof format in all essential respects. The PDDL planner provides an independent verification pathway. The Bayes solver introduces a probabilistic approach that is faster than CSP on the hardest problems thanks to its causal pruning step and best-first expansion order.
 
 The project shows that the gap between "automated theorem prover" and "proof assistant with human-readable output" can be bridged without deep mathematical machinery. The key insight is that natural deduction's own rule structure -- with its clear division between introduction rules (which decompose the goal) and elimination rules (which derive new facts from what is known) -- provides a natural decomposition for both the search algorithm and the proof renderer. All three solvers exploit this same structure, which is why their outputs are visually compatible despite using entirely different search strategies.
+
+---
+
+## References
+
+- Pearl, J. (2000). Causality: Models, Reasoning, and Inference. Cambridge University Press. (2nd ed. 2009.)
+- Darwiche, A. (2009). Modeling and Reasoning with Bayesian Networks. Cambridge University Press.
+- Koller, D., & Friedman, N. (2009). Probabilistic Graphical Models: Principles and Techniques. MIT Press.
+- Richardson, M., & Domingos, P. (2006). Markov logic networks. Machine Learning, 62(1--2), 107--136.
+- De Raedt, L., Kimmig, A., & Toivonen, H. (2007). ProbLog: A probabilistic Prolog and its application in link discovery. IJCAI, 7, 2462--2467.
+- Shpitser, I., & Pearl, J. (2006). Identification of joint interventional distributions in recursive semi-Markovian causal models. AAAI, 21, 1219--1226.
+- https://www.microsoft.com/en-us/research/wp-content/uploads/2010/01/2010_pearl_DecBidMatRol.pdf
+- https://homes.cs.washington.edu/~pedrod/papers/mlj05.pdf
+- https://arxiv.org/pdf/1611.06221
+- https://cs.uwaterloo.ca/~a23gao/cs245_f19/slides/lec07_prop_formal_deduction_nosol.pdf
+- https://cdn.aaai.org/AIPS/1996/AIPS96-033.pdf
+- https://www.cs.toronto.edu/~sheila/2542/s14/A1/bonetgeffner-heusearch-aij01.pdf
+- https://bonetblai.github.io/reports/hsp2-aimag.pdf
+- https://bonetblai.github.io/reports/IJCAI16-Tutorial.pdf
+- https://sdiehl.github.io/zero-to-qed/03_theorem_provers.html
+- https://arxiv.org/pdf/2205.11491
+- https://resources.mpi-inf.mpg.de/departments/rg1/conferences/vtsa08/slides/barret2_smt.pdf
+- https://pure.york.ac.uk/portal/en/publications/a-survey-of-monte-carlo-tree-search-methods
+- https://papers.nips.cc/paper_files/paper/2017/file/b2ab001909a8a6f04b51920306046ce5-Paper.pdf
+- https://arxiv.org/pdf/1609.02907
+- https://people.stfx.ca/jdelamer/courses/csci-564/_downloads/b2220c66675ddde471ca1795147b8e86/A_Formal_Basis_for_the_Heuristic_Determination_of_Minimum_Cost_Paths.pdf
+- https://ai.dmi.unibas.ch/papers/helmert-jair06.pdf
+- https://api.repository.cam.ac.uk/server/api/core/bitstreams/f8e932ce-d55b-448f-911f-ad06f45f5abe/content
+- https://www.cl.cam.ac.uk/~jrh13/papers/hollight.pdf
+- https://arxiv.org/pdf/2312.06490
+- https://arxiv.org/pdf/2406.02103v1
