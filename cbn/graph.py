@@ -57,20 +57,32 @@ class CausalGraph:
     def edges(self) -> frozenset[tuple[str, str]]:
         return frozenset(self._edges)
 
+    def _validate_node(self, node: str) -> None:
+        if node not in self._nodes:
+            raise ValueError(f"Unknown node: '{node}'")
+
+    def _validate_nodes(self, nodes: Iterable[str]) -> None:
+        invalid = set(nodes) - self._nodes
+        if invalid:
+            raise ValueError(f"Unknown graph node(s): {sorted(invalid)}")
+
     # ------------------------------------------------------------------ #
     # Graph traversal
     # ------------------------------------------------------------------ #
 
     def parents(self, node: str) -> frozenset[str]:
         """All nodes with a direct edge INTO *node*."""
+        self._validate_node(node)
         return frozenset(p for p, c in self._edges if c == node)
 
     def children(self, node: str) -> frozenset[str]:
         """All nodes with a direct edge OUT OF *node*."""
+        self._validate_node(node)
         return frozenset(c for p, c in self._edges if p == node)
 
     def ancestors(self, node: str) -> frozenset[str]:
         """All nodes that can reach *node* through directed edges (parents, grandparents, …)."""
+        self._validate_node(node)
         result: set[str] = set()
         frontier: set[str] = set(self.parents(node))
         while frontier:
@@ -82,6 +94,7 @@ class CausalGraph:
 
     def descendants(self, node: str) -> frozenset[str]:
         """All nodes reachable from *node* through directed edges (children, grandchildren, …)."""
+        self._validate_node(node)
         result: set[str] = set()
         frontier: set[str] = set(self.children(node))
         while frontier:
@@ -96,6 +109,7 @@ class CausalGraph:
         Markov blanket of *node*:
           parents ∪ children ∪ {other parents of each child}
         """
+        self._validate_node(node)
         mb: set[str] = set()
         mb.update(self.parents(node))
         for child in self.children(node):
@@ -157,6 +171,7 @@ class CausalGraph:
 
         X_set = set(X)
         Y_set = set(Y)
+        self._validate_nodes(X_set | Y_set | Z_set)
 
         # Pre-compute the "Z ancestors" set used for collider activation.
         # A collider V is activated if V itself or any of V's descendants is in Z.
@@ -272,6 +287,9 @@ def d_separation_trace(
 
     X_set = set(X)
     Y_set = set(Y)
+    invalid = (X_set | Y_set | Z_set) - graph.nodes
+    if invalid:
+        raise ValueError(f"Unknown graph node(s): {sorted(invalid)}")
 
     Z_ancestors: set[str] = set(Z_set)
     for z in Z_set:

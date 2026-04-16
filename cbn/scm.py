@@ -150,6 +150,11 @@ class SCM:
         if extra:
             raise ValueError(f"SCM has variables not in graph: {sorted(extra)}")
 
+    def _validate_keys(self, keys: Iterable[str], context: str) -> None:
+        invalid = set(keys) - set(self.variables)
+        if invalid:
+            raise ValueError(f"{context} contains unknown variables: {sorted(invalid)}")
+
     # ------------------------------------------------------------------ #
     # Rung 1 / 2 — Sample (with optional do-interventions)
     # ------------------------------------------------------------------ #
@@ -172,6 +177,8 @@ class SCM:
         """
         do = interventions or {}
         noise_fix = noise_override or {}
+        self._validate_keys(do, "interventions")
+        self._validate_keys(noise_fix, "noise_override")
         values: dict[str, Any] = {}
         steps: list[SCMStep] = []
 
@@ -227,6 +234,7 @@ class SCM:
         inconsistent with the model.
         """
         topo = self.graph.topological_sort()
+        self._validate_keys(observations, "observations")
         noise_vars = [self.variables[n].noise for n in topo]
 
         consistent: list[tuple[dict[str, Any], list[SCMStep]]] = []
@@ -281,6 +289,8 @@ class SCM:
         Used as Rung-3 step 2 after abduction has fixed the noise.
         Returns (values, steps).
         """
+        self._validate_keys(noise, "noise")
+        self._validate_keys(interventions or {}, "interventions")
         values, steps = self.sample(
             interventions=interventions,
             noise_override=noise,
@@ -343,7 +353,10 @@ class SCM:
         Exact marginal P(query_node) or P(query_node | do(interventions)) by
         enumerating all noise combinations.  Only feasible for small domains.
         """
+        if query_node not in self.variables:
+            raise ValueError(f"Unknown query node: {query_node}")
         do = interventions or {}
+        self._validate_keys(do, "interventions")
         topo = self.graph.topological_sort()
         noise_vars = [self.variables[n].noise for n in topo]
 
