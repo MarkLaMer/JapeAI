@@ -1,33 +1,16 @@
 """
-cbn/logic_causal.py -- Bayesian Network proof solver.
+cbn/logic_causal.py — CBN / SCM-backed natural-deduction solver (complete FOL).
 
-A genuinely independent third solver alongside CSP (depth-first backtracking)
-and PDDL (breadth-first BFS), using four distinct mechanisms:
+Accepts the same (assumptions, goal) input as csp/fol_csp.py and returns
+FOLProofStep objects rendered by the same render_fol_csp_steps() function,
+so the GUI proof pane looks identical to the CSP solver output.
 
-  1. D-separation filter
-     Build a CausalGraph from the implications in the assumption set.  Use
-     the Bayes-ball algorithm to identify which formulas in the domain have
-     an active causal path to the goal atoms given the observed assumption
-     atoms.  Formulas that are d-separated (causally irrelevant) are pruned
-     from the search domain before the search begins.
-
-  2. Best-first probabilistic search
-     A priority queue scored by cumulative Naive Bayes step scores.  Always
-     expands the most promising proof state next.
-       CSP  -- depth-first backtracking + iterative deepening
-       PDDL -- uniform breadth-first BFS
-       Bayes -- best-first, guided by posterior step-success probability
-
-  3. Full FOL rule set
-     Forward rules (each costs one search expansion):
-       forall-elim, exists-intro, or-intro, MP, and-intro, and-elim
-     Structural goal-decomposition rules (free -- handled recursively):
-       imp-intro, forall-intro, exists-elim, or-elim
-
-  4. Implication Introduction
-     To prove A -> B: assume A, spawn a sub-search for B in the extended
-     context, discharge the hypothesis.  Handles all tautologies and
-     hypothetical reasoning problems.
+This module builds the causal graph and SCM, then runs an independent
+factor-style propagation solver in cbn/factor_bp.py.  The CBN / SCM layer
+provides:
+  1. dependency structure via CausalGraph
+  2. deterministic reachability / ordering via SCM
+  3. guidance for the native proof engine's message-passing schedule
 """
 from __future__ import annotations
 
@@ -35,29 +18,11 @@ import heapq
 from math import log
 from typing import Optional
 
-from parser.ast import (
-    Formula, Atom, And, Imp, Not, Or, ForAll, Exists, Var, Predicate,
-)
-from cbn.graph import CausalGraph
-from bayes.scorer import default_step_scorer, default_formula_scorer
-from bayes.features import extract_step_features, _formula_type
-from csp.fol_csp import (
-    FOLStep, FOLImpIntroStep, FOLForAllIntroStep,
-    FOLExistsElimStep, FOLOrElimStep, FOLNotIntroStep, FOLRAAStep, FOLProofStep,
-    _generate_forward_steps, _build_domain, _has_contradiction,
-    _fol_solve_contra,
-    render_fol_csp_steps,
-)
-from logic.fol_prover import subst, _fresh, reset_fresh, collect_terms
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_MAX_STATES      = 3000   # max priority-queue expansions per forward search
-_MAX_STRUCT_DEPTH = 12    # max recursive structural-rule nesting
-_MAX_CONTRA_STEPS = 15    # step budget for contradiction search (RAA / not-intro)
+from parser.ast import Formula, Atom, And, Imp, Not, Or, ForAll, Exists, Var, Predicate
+from cbn.graph import CausalGraph, graph_from_string
+from cbn.scm   import SCM, SCMVariable, NoiseVar
+from csp.fol_csp import render_fol_csp_steps, FOLProofStep
+from cbn.factor_bp import solve_factor_bp
 
 
 # ---------------------------------------------------------------------------
@@ -397,45 +362,60 @@ def solve_logic_causal(
     goal: Formula,
 ) -> Optional[list[FOLProofStep]]:
     """
-    Bayesian Network proof solver.
+    CBN / SCM-backed FOL natural deduction solver.
 
-    Parameters
-    ----------
-    assumptions : parsed Formula objects
-    goal        : target Formula
+    Builds the causal graph and SCM, then runs the independent factor /
+    message-passing proof engine in cbn/factor_bp.py.
+
+    Handles all connectives and quantifiers:  ∀ ∃ ¬ ∨ ∧ →  plus RAA.
 
     Returns
     -------
-    list[FOLProofStep]  -- proof steps (compatible with render_logic_causal_steps)
-    None                -- if the goal is not provable from the assumptions
+    list[FOLProofStep]  — same proof-step types as the GUI renderer expects
+    None                — goal not provable from the given assumptions
     """
-    reset_fresh()
+    graph: CausalGraph | None = None
+    scm: SCM | None = None
+    try:
+        graph, label_map = _build_graph(assumptions, goal)
+        scm = _build_scm(assumptions, graph, label_map)
+    except Exception:
+        pass
 
-    # Build the formula domain (all sub-formulas of assumptions + goal)
-    domain = _build_domain(assumptions, goal)
+    return solve_factor_bp(assumptions, goal, graph=graph, scm=scm)
 
-    # Step 1: Build causal graph
-    if assumptions:
-        try:
-            graph, all_atoms = _build_causal_graph(assumptions, goal)
-        except Exception:
-            graph = CausalGraph(set(), [])
-            all_atoms = set()
-    else:
-        graph = CausalGraph(set(), [])
-        all_atoms = set()
 
-    # Step 2: D-separation filter -- prune causally irrelevant formulas
-    if graph.nodes:
-        assumption_atoms: set[str] = set()
-        for f in assumptions:
-            if isinstance(f, (Atom, Var, Predicate)):
-                assumption_atoms.update(_atom_nodes(f))
-        goal_atoms = _atom_nodes(goal)
-        domain = _dsep_filter(domain, graph, assumption_atoms, goal_atoms)
+def explain_logic_causal(
+    assumptions: list[Formula],
+    goal: Formula,
+) -> list[CausalProofLine] | None:
+    """
+    Return the proof as a flat list of (conclusion, rule_label) pairs.
+    Used by the CLI (main.py) for the "formula   (rule)" output format.
 
-    # Steps 3+4: Structural decomposition + best-first Bayesian search
-    return _solve(list(assumptions), goal, domain)
+    Structural sub-proofs (∀-intro scope, →-intro scope, etc.) are rendered
+    with indentation encoded in the action string.
+    """
+    steps = solve_logic_causal(assumptions, goal)
+    if steps is None:
+        return None
+
+    lines: list = []
+    render_fol_csp_steps(steps, lines)
+
+    result: list[CausalProofLine] = []
+    _NON_DERIVED = {"assumption", "assumptions", "premise", "premises", "hyp"}
+    for depth, formula_str, rule_label, note in lines:
+        if rule_label in _NON_DERIVED:
+            continue
+        indent = "  " * depth
+        note_part = f"  [{note}]" if note else ""
+        result.append(CausalProofLine(
+            conclusion=f"{indent}{formula_str}",
+            action=f"{rule_label}{note_part}",
+        ))
+
+    return result
 
 
 def render_logic_causal_steps(

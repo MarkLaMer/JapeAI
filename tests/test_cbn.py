@@ -695,6 +695,19 @@ class TestLogicCausal:
         assert result is not None
 
 
+def test_logic_causal_is_independent_from_csp(monkeypatch):
+    from csp import fol_csp
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("CBN solver delegated to CSP")
+
+    monkeypatch.setattr(fol_csp, "solve_fol_csp", _boom)
+
+    result = _lc(["P", "P -> Q"], "Q")
+    assert result is not None
+    assert any(isinstance(step, FOLStep) and step.rule == "mp" for step in result)
+
+
 class TestLogicCausalCBNStructure:
     """Verify the causal graph and d-separation filter work correctly."""
 
